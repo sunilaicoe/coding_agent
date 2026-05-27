@@ -397,11 +397,11 @@ export const ChatImpl = memo(
       });
     }, [messages, isLoading, parseMessages]);
 
-    const previewErrors = useStore(previewErrorFixer.errors);
+        const previewErrors = useStore(previewErrorFixer.errors);
     const terminalErrors = useStore(previewErrorFixer.terminalErrors);
     const previewRetryCount = useStore(previewErrorFixer.retryCount);
 
-    // AUTO-FIX: Watch for ANY errors (preview + terminal) and automatically send them to the AI
+    // AUTO-FIX LOOP: Detect errors → send to AI → wait for fix → re-check → repeat
     useEffect(() => {
       const hasErrors = previewErrors.length > 0 || terminalErrors.length > 0;
 
@@ -416,66 +416,87 @@ export const ChatImpl = memo(
         return;
       }
 
-      // Delay to avoid race conditions with streaming
+      // Don't rush — let the error settle, let streaming finish
       const timer = setTimeout(() => {
         if (!previewErrorFixer.canAutoFix()) return;
 
         const errorMsg = previewErrorFixer.formatErrorForAI();
-
         if (!errorMsg) return;
 
         previewErrorFixer.incrementRetry();
         previewErrorFixer.setFixing(true);
-
-        // Clear the alert since we're handling it
         workbenchStore.clearAlert();
 
-        const fixMessage = `[Model: \${model}]\n\n[Provider: \${provider.name}]\n\n\${errorMsg}`;
-
         const errorType = terminalErrors.length > 0 ? 'TERMINAL' : 'PREVIEW';
-        console.log(`AUTO-FIX: Sending \${errorType} error to AI (attempt \${previewErrorFixer.retryCount.get()})`);
+        const attempt = previewErrorFixer.retryCount.get();
+        console.log('[AUTO-FIX] Sending ' + errorType + ' error to AI (attempt ' + attempt + '/100)');
 
-        append({
-          role: 'user',
-          content: fixMessage,
-        });
+        const fixMessage = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\n' + errorMsg;
+        append({ role: 'user', content: fixMessage });
 
-        // Mark as fixed after a delay to allow the AI to respond and files to be written
-        const hadTerminalErrors = terminalErrors.length > 0;
-        setTimeout(() => {
-          previewErrorFixer.setFixing(false);
-          previewErrorFixer.markFixed();
+        // POLLING RE-CHECK: Wait for AI to respond, then re-check for errors
+        // This creates the auto-recovery loop:
+        //   Error → AI fixes → new error? → AI fixes again → clean? → done
+        let checkCount = 0;
+        const maxChecks = 30; // Check for 2.5 minutes (5s * 30)
+        const pollInterval = setInterval(() => {
+          checkCount++;
 
-          // If this was a terminal error, restart the dev server after AI fixes files
-          if (hadTerminalErrors) {
-            console.log('[AUTO-FIX] Terminal error fixed \u2014 restarting dev server in 10s...');
-            setTimeout(async () => {
-              try {
-                const { webcontainer } = await import('~/lib/webcontainer');
-                const wc = await webcontainer;
-                const terminal = workbenchStore.genesisTerminal();
-                if (!terminal || !terminal.process) return;
-                await terminal.ready();
+          const currentErrors = previewErrorFixer.errors.get();
+          const currentTerminal = previewErrorFixer.terminalErrors.get();
+          const stillHasErrors = currentErrors.length > 0 || currentTerminal.length > 0;
 
-                // Check if dev server is already running
-                const previews = workbenchStore.previews.get();
-                if (previews.length > 0 && previews.some((p) => p.ready)) {
-                  console.log('[AUTO-FIX] Preview already running \u2014 no restart needed');
-                  return;
-                }
+          if (!stillHasErrors) {
+            // No more errors — clean!
+            console.log('[AUTO-FIX] All errors resolved after ' + (checkCount * 5) + 's');
+            previewErrorFixer.setFixing(false);
+            previewErrorFixer.markFixed();
+            clearInterval(pollInterval);
+            return;
+          }
 
-                console.log('[AUTO-FIX] Running npm install...');
-                await terminal.executeCommand(`autofix-install-\${Date.now()}`, 'npm install', () => {});
-                await new Promise((r) => setTimeout(r, 2000));
-                console.log('[AUTO-FIX] Starting dev server...');
-                await terminal.executeCommand(`autofix-start-\${Date.now()}`, 'npm run dev', () => {});
-              } catch (e) {
-                console.error('[AUTO-FIX] Restart failed:', e);
-              }
-            }, 10000);
+          // Still has errors — check if AI is done responding (not loading)
+          if (checkCount >= maxChecks) {
+            // Timeout — clear fixing state so next error can trigger a new fix cycle
+            console.log('[AUTO-FIX] Poll timeout after ' + (maxChecks * 5) + 's — allowing retry');
+            previewErrorFixer.setFixing(false);
+            previewErrorFixer.markFixed();
+            clearInterval(pollInterval);
+            return;
+          }
+
+          // If we get here, errors still exist but we're waiting
+          // The AI is probably still responding — keep polling
+          if (checkCount % 6 === 0) {
+            // Log every 30 seconds
+            console.log('[AUTO-FIX] Still monitoring errors... (' + (checkCount * 5) + 's, ' + (currentErrors.length + currentTerminal.length) + ' errors)');
           }
         }, 5000);
-      }, 2000); // 2 second delay to let the error settle
+
+        // Also restart dev server for terminal errors after AI responds
+        if (terminalErrors.length > 0) {
+          setTimeout(async () => {
+            try {
+              const terminal = workbenchStore.genesisTerminal();
+              if (!terminal || !terminal.process) return;
+              await terminal.ready();
+
+              const previews = workbenchStore.previews.get();
+              if (previews.length > 0 && previews.some((p) => p.ready)) {
+                console.log('[AUTO-FIX] Preview running after fix');
+                return;
+              }
+
+              console.log('[AUTO-FIX] Restarting dev server after terminal fix...');
+              await terminal.executeCommand('autofix-install-' + Date.now(), 'npm install', () => {});
+              await new Promise((r) => setTimeout(r, 2000));
+              await terminal.executeCommand('autofix-start-' + Date.now(), 'npm run dev', () => {});
+            } catch (e) {
+              console.error('[AUTO-FIX] Restart failed:', e);
+            }
+          }, 15000); // 15s delay for AI to finish writing files
+        }
+      }, 3000); // 3 second delay to let error settle
 
       return () => clearTimeout(timer);
     }, [previewErrors, terminalErrors, previewRetryCount, chatStarted, isLoading, model, provider]);
