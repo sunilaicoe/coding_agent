@@ -205,7 +205,7 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
-    // RELOAD RECOVERY: scan project, restart dev server, continue AI
+    // RELOAD RECOVERY: study existing project + continue building
     const reloadHandled = useRef(false);
     useEffect(() => {
       if (
@@ -220,172 +220,171 @@ export const ChatImpl = memo(
 
       reloadHandled.current = true;
 
-      // Scan project files from WebContainer
-      const scanProject = async (wc: any): Promise<{files: string[], srcFiles: string[], hasPackageJson: boolean, deps: string[], scripts: string[]}> => {
-        const result = { files: [] as string[], srcFiles: [] as string[], hasPackageJson: false, deps: [] as string[], scripts: [] as string[] };
-
-        try {
-          const entries = await wc.fs.readdir('/home/project', { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isFile()) result.files.push(entry.name);
-          }
-        } catch {}
-
-        try {
-          const srcEntries = await wc.fs.readdir('/home/project/src', { withFileTypes: true });
-          for (const entry of srcEntries) {
-            if (entry.isFile()) result.srcFiles.push(entry.name);
-          }
-        } catch {}
-
-        try {
-          const pkg = await wc.fs.readFile('/home/project/package.json', 'utf-8');
-          result.hasPackageJson = true;
-          const parsed = JSON.parse(pkg);
-          result.deps = Object.keys(parsed.dependencies || {});
-          result.scripts = Object.keys(parsed.scripts || {});
-        } catch {}
-
-        return result;
-      };
-
-      // Restart dev server
-      const restartDevServer = async (): Promise<boolean> => {
-        try {
-          const { webcontainer } = await import('~/lib/webcontainer');
-          const wc = await webcontainer;
-
-          const previews = workbenchStore.previews.get();
-          if (previews.length > 0 && previews.some((p) => p.ready)) {
-            console.log('[Reload] Preview already running');
-            return true;
-          }
-
-          if (!await wc.fs.readFile('/home/project/package.json', 'utf-8').catch(() => '')) return false;
-
-          console.log('[Reload] Restarting dev server...');
-          const terminal = workbenchStore.genesisTerminal();
-          if (!terminal || !terminal.process) return false;
-
-          await terminal.ready();
-          await terminal.executeCommand('reload-install-' + Date.now(), 'npm install', () => {});
-          await new Promise((r) => setTimeout(r, 2000));
-          await terminal.executeCommand('reload-start-' + Date.now(), 'npm run dev', () => {});
-          await new Promise((r) => setTimeout(r, 5000));
-
-          const newPreviews = workbenchStore.previews.get();
-          return newPreviews.length > 0;
-        } catch (error) {
-          console.error('[Reload] Restart failed:', error);
-          return false;
-        }
-      };
-
-      // MAIN RECOVERY LOGIC
       (async () => {
-        console.log('[Reload] Starting recovery with', initialMessages.length, 'messages');
+        console.log('[Reload] Starting recovery...');
 
-        // Collect ALL assistant content across all messages
-        let allAssistantContent = '';
+        // Step 1: Find original user request
+        let originalRequest = '';
+        for (const msg of initialMessages) {
+          if (msg.role !== 'user') continue;
+          const c = typeof msg.content === 'string' ? msg.content : '';
+          if (c.includes('[Provider:')) {
+            const parts = c.split('\n\n');
+            originalRequest = parts.filter(p => !p.startsWith('[Model:') && !p.startsWith('[Provider:')).join('\n\n').trim();
+            if (originalRequest.length > 10) break;
+          }
+        }
+
+        // Step 2: Collect all file paths AI created
         let allFilepaths: string[] = [];
+        let allAssistantContent = '';
         for (const msg of initialMessages) {
           if (msg.role !== 'assistant') continue;
           const c = typeof msg.content === 'string' ? msg.content : '';
           allAssistantContent += c + '\n';
-
-          // Extract file paths from genesisAction tags
           const fileMatches = c.matchAll(/type="file"\s+filePath="([^"]+)"/g);
           for (const m of fileMatches) allFilepaths.push(m[1]);
         }
 
-        // Check if last response was cut off
+        // Step 3: Check if last response was cut off
         const lastAssistant = [...initialMessages].reverse().find((m) => m.role === 'assistant');
         const lastContent = lastAssistant
           ? (typeof lastAssistant.content === 'string' ? lastAssistant.content : '')
           : '';
-
         const hasUnclosedArtifact = lastContent.includes('<genesisArtifact') &&
           (lastContent.match(/<genesisArtifact/g) || []).length > (lastContent.match(/<\/genesisArtifact>/g) || []).length;
-        const hasStartAction = allAssistantContent.includes('type="start"') || allAssistantContent.includes('npm run dev');
-        const hasFileActions = allFilepaths.length > 0;
         const wasCutOff = hasUnclosedArtifact;
 
-        // Wait for WebContainer to boot and files to replay
+        // Step 4: Wait for WebContainer + parser replay
+        console.log('[Reload] Waiting for WebContainer and file replay...');
         const { webcontainer } = await import('~/lib/webcontainer');
         const wc = await webcontainer;
-        await new Promise((r) => setTimeout(r, 8000));
+        await new Promise((r) => setTimeout(r, 12000));
 
-        // Scan actual project state
-        const project = await scanProject(wc);
-        console.log('[Reload] Project scan:', JSON.stringify(project));
+        // Step 5: Scan actual project files
+        let rootFiles: string[] = [];
+        let srcFiles: string[] = [];
+        let componentFiles: string[] = [];
+        let pkgJson = '';
+        let appContent = '';
 
-        // Try to restart dev server
-        const serverOk = await restartDevServer();
+        try {
+          const entries = await wc.fs.readdir('/home/project', { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isFile()) rootFiles.push(entry.name);
+          }
+        } catch {}
+        try {
+          const entries = await wc.fs.readdir('/home/project/src', { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isFile()) srcFiles.push(entry.name);
+          }
+        } catch {}
+        try {
+          const entries = await wc.fs.readdir('/home/project/src/components', { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isFile()) componentFiles.push(entry.name);
+          }
+        } catch {}
+        try { pkgJson = await wc.fs.readFile('/home/project/package.json', 'utf-8'); } catch {}
+        try { appContent = await wc.fs.readFile('/home/project/src/App.jsx', 'utf-8'); } catch {}
 
-        // Build status report
-        const statusLines: string[] = [
-          'PAGE RELOADED — PROJECT STATUS REPORT:',
+        let deps: string[] = [];
+        let scripts: string[] = [];
+        try {
+          const parsed = JSON.parse(pkgJson);
+          deps = Object.keys(parsed.dependencies || {});
+          scripts = Object.keys(parsed.scripts || {});
+        } catch {}
+
+        // Step 6: Restart dev server
+        let serverOk = false;
+        try {
+          const previews = workbenchStore.previews.get();
+          if (previews.length > 0 && previews.some((p) => p.ready)) serverOk = true;
+        } catch {}
+
+        if (!serverOk) {
+          try {
+            const terminal = workbenchStore.genesisTerminal();
+            if (terminal && terminal.process) {
+              await terminal.ready();
+              console.log('[Reload] Restarting dev server...');
+              await terminal.executeCommand('reload-install-' + Date.now(), 'npm install', () => {});
+              await new Promise((r) => setTimeout(r, 3000));
+              await terminal.executeCommand('reload-start-' + Date.now(), 'npm run dev', () => {});
+              await new Promise((r) => setTimeout(r, 5000));
+              const previews = workbenchStore.previews.get();
+              serverOk = previews.length > 0;
+            }
+          } catch (e) {
+            console.error('[Reload] Dev server restart failed:', e);
+          }
+        }
+
+        // Step 7: Build status report
+        const lines: string[] = [
+          '=== PAGE RELOADED ===',
           '',
-          'FILES CREATED (' + allFilepaths.length + ' total):',
-          ...allFilepaths.map((f) => '  - ' + f),
+          'ORIGINAL REQUEST:',
+          originalRequest || '(not found)',
+          '',
+          'AI CREATED FILES (' + allFilepaths.length + '):',
+          ...allFilepaths.map(f => '  ' + f),
           '',
           'ACTUAL FILES IN WEBCONTAINER:',
-          '  Root: ' + project.files.join(', '),
-          '  Src: ' + project.srcFiles.join(', '),
+          'Root: ' + (rootFiles.join(', ') || '(empty)'),
+          'Src: ' + (srcFiles.join(', ') || '(empty)'),
+          'Components: ' + (componentFiles.join(', ') || '(none)'),
           '',
-          'PACKAGE.JSON: ' + (project.hasPackageJson ? 'EXISTS' : 'MISSING'),
-          'DEPENDENCIES: ' + project.deps.join(', '),
-          'SCRIPTS: ' + project.scripts.join(', '),
+          'PACKAGE.JSON:',
+          pkgJson || '(missing)',
           '',
+          'App.jsx (first 2000 chars):',
+          appContent ? appContent.substring(0, 2000) : '(missing)',
+          '',
+          'DEPENDENCIES: ' + deps.join(', '),
+          'SCRIPTS: ' + scripts.join(', '),
           'DEV SERVER: ' + (serverOk ? 'RUNNING' : 'NOT RUNNING'),
-          'RESPONSE STATUS: ' + (wasCutOff ? 'CUT OFF (incomplete)' : 'COMPLETE'),
+          'STATUS: ' + (wasCutOff ? 'CUT OFF' : 'COMPLETE'),
           '',
         ];
 
-        // Decide what to do
+        // Step 8: Instructions
         if (wasCutOff) {
-          // AI was cut off — continue writing files
-          statusLines.push(
-            'ACTION: Your previous response was CUT OFF.',
-            'Continue writing the remaining files from where you left off.',
-            'Do NOT repeat any code already written.',
+          lines.push(
+            'Your response was CUT OFF. Study the files above.',
             'Do NOT recreate files that already exist.',
-            'Write ONLY the files that were NOT yet written.',
-            'ALWAYS end with:',
-            '<genesisAction type="shell">npm install</genesisAction>',
+            'Write ONLY the missing files.',
+            'End with: <genesisAction type="shell">npm install</genesisAction>',
             '<genesisAction type="start">npm run dev</genesisAction>',
           );
         } else if (!serverOk) {
-          // Dev server not running — ask AI to fix and continue
-          statusLines.push(
-            'ACTION: The dev server is NOT running after reload.',
-            'Possible causes: missing files, wrong package.json, broken imports.',
-            '',
-            'Please:',
-            '1. Check if ALL required files exist (especially src/App.jsx)',
-            '2. Fix any broken imports or syntax errors',
-            '3. If the project is incomplete, add the remaining features',
-            '4. Make sure package.json has correct dependencies and scripts',
-            '5. End with npm install and npm run dev',
+          lines.push(
+            'Dev server NOT running. Study the existing code above.',
+            'Fix: missing imports, syntax errors, wrong paths.',
+            'Add missing features from the original request.',
+            'Output ONLY new or corrected files.',
+            'End with: <genesisAction type="shell">npm install</genesisAction>',
+            '<genesisAction type="start">npm run dev</genesisAction>',
           );
         } else {
-          // Everything running — check if project is complete or can be improved
-          statusLines.push(
-            'ACTION: The project is running. Review what exists and continue improving:',
-            '1. Check if all features from the original request are implemented',
-            '2. Add any missing features or components',
-            '3. Improve UI/UX, animations, responsive design',
-            '4. Fix any console errors or warnings',
-            '5. Add polish: loading states, error boundaries, accessibility',
-            '6. End with npm install and npm run dev',
+          lines.push(
+            'Project is running. Study the code above.',
+            'Compare original request vs what exists.',
+            'Add missing features, improve UI, fix errors.',
+            'Output ONLY new or modified files.',
+            'End with: <genesisAction type="shell">npm install</genesisAction>',
+            '<genesisAction type="start">npm run dev</genesisAction>',
           );
         }
 
-        const reloadMsg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\n' + statusLines.join('\n');
-        console.log('[Reload] Sending recovery message to AI...');
+        const reloadMsg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\n' + lines.join('\n');
+        console.log('[Reload] Sending study+continue to AI...');
         append({ role: 'user', content: reloadMsg });
       })();
     }, [initialMessages, isLoading, model, provider, append]);
+
 
     useEffect(() => {
       processSampledMessages({
