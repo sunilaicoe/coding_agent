@@ -38,55 +38,11 @@ export function Chat() {
   const { ready, initialMessages, storeMessageHistory, importChat, exportChat } = useChatHistory();
   const title = useStore(description);
   useEffect(() => {
+    if (initialMessages.length === 0) return;
+
+    console.log('[Reload] Chat restored with', initialMessages.length, 'messages');
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
-
-    // On reload with existing messages, ensure workbench shows and dev server restarts
-    if (initialMessages.length > 0) {
-      workbenchStore.showWorkbench.set(true);
-
-      const autoRestart = async () => {
-        try {
-          const { webcontainer } = await import('~/lib/webcontainer');
-          const wc = await webcontainer;
-
-          // Wait for file replay to complete
-          await new Promise((r) => setTimeout(r, 5000));
-
-          // Check if dev server is already running
-          const previews = workbenchStore.previews.get();
-          if (previews.length > 0 && previews.some((p) => p.ready)) {
-            console.log('[Reload] Preview already running — no restart needed');
-            return;
-          }
-
-          // Check if package.json exists
-          try {
-            await wc.fs.readFile('package.json', 'utf-8');
-          } catch {
-            console.log('[Reload] No package.json — skipping restart');
-            return;
-          }
-
-          console.log('[Reload] Restarting dev server...');
-          const terminal = workbenchStore.genesisTerminal();
-          if (!terminal || !terminal.process) {
-            console.warn('[Reload] No terminal available');
-            return;
-          }
-
-          await terminal.ready();
-
-          // Install and start
-          await terminal.executeCommand(`reload-install-${Date.now()}`, 'npm install', () => {});
-          await new Promise((r) => setTimeout(r, 2000));
-          await terminal.executeCommand(`reload-start-${Date.now()}`, 'npm run dev', () => {});
-        } catch (error) {
-          console.error('[Reload] Auto-restart failed:', error);
-        }
-      };
-
-      autoRestart();
-    }
+    workbenchStore.showWorkbench.set(true);
   }, [initialMessages]);
 
   return (
@@ -249,11 +205,11 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
-    // AUTO-CONTINUE on reload: if last message is incomplete, send continue to AI
-    const hasAutoContinued = useRef(false);
+    // RELOAD RECOVERY: restart dev server + continue AI if needed
+    const reloadHandled = useRef(false);
     useEffect(() => {
       if (
-        hasAutoContinued.current ||
+        reloadHandled.current ||
         initialMessages.length === 0 ||
         isLoading ||
         !model ||
@@ -262,38 +218,77 @@ export const ChatImpl = memo(
         return;
       }
 
-      // Check if last assistant message looks incomplete
-      const lastMsg = initialMessages[initialMessages.length - 1];
-      if (lastMsg?.role !== 'assistant') return;
+      reloadHandled.current = true;
 
-      const content = typeof lastMsg.content === 'string'
-        ? lastMsg.content
-        : Array.isArray(lastMsg.content)
-          ? lastMsg.content.find((p: any) => p.type === 'text')?.text || ''
-          : '';
+      // Find the last assistant message (skip user/hidden messages)
+      const lastAssistant = [...initialMessages].reverse().find((m) => m.role === 'assistant');
+      const assistantContent = lastAssistant
+        ? typeof lastAssistant.content === 'string'
+          ? lastAssistant.content
+          : Array.isArray(lastAssistant.content)
+            ? (lastAssistant.content.find((p: any) => p.type === 'text')?.text || '')
+            : ''
+        : '';
 
-      // Incomplete if: unclosed tags, no start action, very short
-      const hasUnclosedArtifact = content.includes('<genesisArtifact') &&
-        (content.match(/<genesisArtifact/g) || []).length > (content.match(/<\/genesisArtifact>/g) || []).length;
-      const hasNoStartAction = !content.includes('type="start"');
-      const hasFileActions = content.includes('type="file"');
-      const hasNoNpmRunDev = !content.includes('npm run dev');
-      const isIncomplete = hasUnclosedArtifact || (hasFileActions && hasNoStartAction) || (hasFileActions && hasNoNpmRunDev);
+      // Check if response was incomplete
+      const hasUnclosedArtifact = assistantContent.includes('<genesisArtifact') &&
+        (assistantContent.match(/<genesisArtifact/g) || []).length > (assistantContent.match(/<\/genesisArtifact>/g) || []).length;
+      const hasFileActions = assistantContent.includes('type="file"');
+      const hasStartAction = assistantContent.includes('type="start"') || assistantContent.includes('npm run dev');
+      const needsContinue = hasUnclosedArtifact || (hasFileActions && !hasStartAction);
 
-      if (!isIncomplete) return;
+      console.log('[Reload] Files:', hasFileActions, 'Start:', hasStartAction, 'Continue:', needsContinue);
 
-      hasAutoContinued.current = true;
-      console.log('[Reload] Last message incomplete — auto-continuing AI...');
+      // Restart dev server function
+      const restartDevServer = async (): Promise<boolean> => {
+        try {
+          const { webcontainer } = await import('~/lib/webcontainer');
+          const wc = await webcontainer;
+          await new Promise((r) => setTimeout(r, 8000));
 
-      // Wait for WebContainer to be ready, then send continue
-      setTimeout(() => {
-        const continueMsg = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\nCRITICAL: You were reloaded. Your previous response was cut off. CONTINUE immediately from where you left off.\n\n1. Do NOT repeat any code already written\n2. Continue writing the remaining files\n3. ALWAYS end with:\n   <genesisAction type="shell">npm install</genesisAction>\n   <genesisAction type="start">npm run dev</genesisAction>\n\nContinue now.`;
+          const previews = workbenchStore.previews.get();
+          if (previews.length > 0 && previews.some((p) => p.ready)) {
+            console.log('[Reload] Preview running');
+            return true;
+          }
 
-        append({
-          role: 'user',
-          content: continueMsg,
-        });
-      }, 3000);
+          try { await wc.fs.readFile('package.json', 'utf-8'); } catch { return false; }
+
+          console.log('[Reload] Restarting dev server...');
+          const terminal = workbenchStore.genesisTerminal();
+          if (!terminal || !terminal.process) return false;
+
+          await terminal.ready();
+          await terminal.executeCommand('reload-install-' + Date.now(), 'npm install', () => {});
+          await new Promise((r) => setTimeout(r, 2000));
+          await terminal.executeCommand('reload-start-' + Date.now(), 'npm run dev', () => {});
+          await new Promise((r) => setTimeout(r, 5000));
+
+          const newPreviews = workbenchStore.previews.get();
+          return newPreviews.length > 0;
+        } catch (error) {
+          console.error('[Reload] Restart failed:', error);
+          return false;
+        }
+      };
+
+      // Run recovery
+      (async () => {
+        if (needsContinue) {
+          console.log('[Reload] Incomplete - continuing AI...');
+          const msg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\nThe page was reloaded and your response was cut off. CONTINUE now.\n\n1. Do NOT repeat code already written\n2. Write the remaining files\n3. ALWAYS end with npm install and npm run dev';
+          append({ role: 'user', content: msg });
+        } else {
+          console.log('[Reload] Complete - restarting dev server...');
+          const ok = await restartDevServer();
+          if (!ok) {
+            console.log('[Reload] Restart failed - asking AI to fix...');
+            await new Promise((r) => setTimeout(r, 3000));
+            const fixMsg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\nThe page was reloaded. The project needs to restart.\n\n1. Check all files are correct\n2. Ensure package.json has all dependencies\n3. Output any fixes\n4. End with npm install and npm run dev';
+            append({ role: 'user', content: fixMsg });
+          }
+        }
+      })();
     }, [initialMessages, isLoading, model, provider, append]);
 
     useEffect(() => {
