@@ -68,10 +68,35 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
     }>();
 
   const cookieHeader = request.headers.get('Cookie');
-  const apiKeys = JSON.parse(parseCookies(cookieHeader || '').apiKeys || '{}');
+  const cookieApiKeys = JSON.parse(parseCookies(cookieHeader || '').apiKeys || '{}');
   const providerSettings: Record<string, IProviderSetting> = JSON.parse(
     parseCookies(cookieHeader || '').providers || '{}',
   );
+
+  // API keys: body takes priority over cookies, env vars as final fallback
+  const bodyApiKeys = (request as any).__bodyApiKeys || {};
+  const apiKeys: Record<string, string> = {
+    ...cookieApiKeys,
+    ...bodyApiKeys,
+    // Env var fallbacks for common providers
+    ...(process.env.ZAI_API_KEY && !cookieApiKeys['Z.ai'] ? { 'Z.ai': process.env.ZAI_API_KEY } : {}),
+    ...(process.env.OPENAI_API_KEY && !cookieApiKeys['OpenAI'] ? { OpenAI: process.env.OPENAI_API_KEY } : {}),
+    ...(process.env.ANTHROPIC_API_KEY && !cookieApiKeys['Anthropic'] ? { Anthropic: process.env.ANTHROPIC_API_KEY } : {}),
+    ...(process.env.GOOGLE_GENERATIVE_AI_API_KEY && !cookieApiKeys['Google'] ? { Google: process.env.GOOGLE_GENERATIVE_AI_API_KEY } : {}),
+    ...(process.env.GROQ_API_KEY && !cookieApiKeys['Groq'] ? { Groq: process.env.GROQ_API_KEY } : {}),
+    ...(process.env.DEEPSEEK_API_KEY && !cookieApiKeys['DeepSeek'] ? { DeepSeek: process.env.DEEPSEEK_API_KEY } : {}),
+    ...(process.env.MISTRAL_API_KEY && !cookieApiKeys['Mistral'] ? { Mistral: process.env.MISTRAL_API_KEY } : {}),
+    ...(process.env.OPEN_ROUTER_API_KEY && !cookieApiKeys['OpenRouter'] ? { OpenRouter: process.env.OPEN_ROUTER_API_KEY } : {}),
+    ...(process.env.TOGETHER_API_KEY && !cookieApiKeys['Together'] ? { Together: process.env.TOGETHER_API_KEY } : {}),
+  };
+
+  // Log which providers have keys available (for debugging, don't log actual keys)
+  const availableProviders = Object.keys(apiKeys).filter(k => apiKeys[k] && apiKeys[k] !== 'your_zai_api_key_here');
+  if (availableProviders.length > 0) {
+    logger.debug('API keys available for providers:', availableProviders.join(', '));
+  } else {
+    logger.warn('No API keys configured! Set keys in browser UI Settings or .env.local');
+  }
 
   const stream = new SwitchableStream();
 
@@ -362,9 +387,10 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         if (
           errorMessage.includes('API key') ||
           errorMessage.includes('unauthorized') ||
-          errorMessage.includes('authentication')
+          errorMessage.includes('authentication') ||
+          errorMessage.includes('Missing Api Key')
         ) {
-          return 'Custom error: Invalid or missing API key. Please check your API key configuration.';
+          return 'Custom error: Invalid or missing API key. Please check your API key configuration.\\n\\nHow to fix:\\n1. Click the Settings icon (gear) in the chat input area\\n2. Enter your API key for the selected provider\\n3. For Z.ai: Get your key from https://open.bigmodel.cn/usercenter/apikeys\\n4. Make sure the key format is: id.secret (e.g., abc123.def456)';
         }
 
         if (errorMessage.includes('token') && errorMessage.includes('limit')) {
