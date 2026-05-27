@@ -583,66 +583,65 @@ export const ChatImpl = memo(
         setFakeLoading(true);
 
         if (autoSelectTemplate) {
-          const { template, title } = await selectStarterTemplate({
+          let { template, title } = await selectStarterTemplate({
             message: finalMessageContent,
             model,
             provider,
           });
 
-          if (template !== 'blank') {
-            const temResp = await getTemplates(template, title).catch((e) => {
-              if (e.message.includes('rate limit')) {
-                toast.warning('Rate limit exceeded. Skipping starter template\n Continuing with blank template');
-              } else {
-                toast.warning('Failed to import starter template\n Continuing with blank template');
-              }
+          // ALWAYS use React + Vite — never blank for any real project
+          if (template === 'blank') {
+            console.log('[Chat] Overriding blank → built-in React + Vite template');
+            template = 'Vite React';
+          }
 
-              return null;
-            });
+          const temResp = await getTemplates(template, title).catch((e) => {
+            console.error('[Chat] Template fetch failed, using built-in fallback:', e);
+            return null;
+          });
 
-            if (temResp) {
-              const { assistantMessage, userMessage } = temResp;
-              const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
+          if (temResp) {
+            const { assistantMessage, userMessage } = temResp;
+            const userMessageText = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${finalMessageContent}`;
 
-              setMessages([
-                {
-                  id: `1-${new Date().getTime()}`,
-                  role: 'user',
-                  content: userMessageText,
-                  parts: createMessageParts(userMessageText, imageDataList),
-                },
-                {
-                  id: `2-${new Date().getTime()}`,
-                  role: 'assistant',
-                  content: assistantMessage,
-                },
-                {
-                  id: `3-${new Date().getTime()}`,
-                  role: 'user',
-                  content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userMessage}`,
-                  annotations: ['hidden'],
-                },
-              ]);
+            setMessages([
+              {
+                id: `1-${new Date().getTime()}`,
+                role: 'user',
+                content: userMessageText,
+                parts: createMessageParts(userMessageText, imageDataList),
+              },
+              {
+                id: `2-${new Date().getTime()}`,
+                role: 'assistant',
+                content: assistantMessage,
+              },
+              {
+                id: `3-${new Date().getTime()}`,
+                role: 'user',
+                content: `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${userMessage}`,
+                annotations: ['hidden'],
+              },
+            ]);
 
-              const reloadOptions =
-                uploadedFiles.length > 0
-                  ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
-                  : undefined;
+            const reloadOptions =
+              uploadedFiles.length > 0
+                ? { experimental_attachments: await filesToAttachments(uploadedFiles) }
+                : undefined;
 
-              reload(reloadOptions);
-              setInput('');
-              Cookies.remove(PROMPT_COOKIE_KEY);
+            reload(reloadOptions);
+            setInput('');
+            Cookies.remove(PROMPT_COOKIE_KEY);
 
-              setUploadedFiles([]);
-              setImageDataList([]);
+            setUploadedFiles([]);
+            setImageDataList([]);
 
-              resetEnhancer();
+            resetEnhancer();
 
-              textareaRef.current?.blur();
-              setFakeLoading(false);
+            textareaRef.current?.blur();
+            setFakeLoading(false);
 
-              return;
-            }
+            return;
           }
         }
 

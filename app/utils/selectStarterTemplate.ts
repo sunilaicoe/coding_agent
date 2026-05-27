@@ -1,4 +1,5 @@
 import ignore from 'ignore';
+import { getBuiltInTemplateArtifact } from './built-in-templates';
 import type { ProviderInfo } from '~/types/model';
 import type { Template } from '~/types/template';
 import { STARTER_TEMPLATES } from './constants';
@@ -145,11 +146,23 @@ export async function getTemplates(templateName: string, title?: string) {
   const template = STARTER_TEMPLATES.find((t) => t.name == templateName);
 
   if (!template) {
-    return null;
+    console.log('[Template] No template found, using built-in React + Vite template');
+    return getBuiltInTemplateArtifact(title || 'GENESIS Project');
   }
 
-  const githubRepo = template.githubRepo;
-  const files = await getGitHubRepoContent(githubRepo);
+  // Try GitHub fetch, fall back to built-in template on ANY error
+  let files;
+  try {
+    const githubRepo = template.githubRepo;
+    files = await getGitHubRepoContent(githubRepo);
+
+    if (!files || files.length === 0) {
+      throw new Error('Empty response from GitHub');
+    }
+  } catch (error) {
+    console.error('[Template] GitHub fetch failed, using built-in React + Vite template:', error);
+    return getBuiltInTemplateArtifact(title || templateName);
+  }
 
   let filteredFiles = files;
 
