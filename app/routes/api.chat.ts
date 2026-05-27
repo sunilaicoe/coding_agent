@@ -41,10 +41,10 @@ function parseCookies(cookieHeader: string): Record<string, string> {
 
 async function chatAction({ context, request }: ActionFunctionArgs) {
   const streamRecovery = new StreamRecoveryManager({
-    timeout: 120000,
-    maxRetries: 3,
+    timeout: 600000, // 10 minutes — long AI responses need time
+    maxRetries: 10,  // More retries for reliability
     onTimeout: () => {
-      logger.warn('Stream timeout - recovering');
+      logger.warn('Stream timeout - recovering (will auto-retry)');
     },
   });
 
@@ -245,6 +245,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           },
           onFinish: async ({ text: content, finishReason, usage }) => {
             logger.debug('usage', JSON.stringify(usage));
+            logger.debug('finishReason:', finishReason);
 
             if (usage) {
               cumulativeUsage.completionTokens += usage.completionTokens || 0;
@@ -252,7 +253,26 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
               cumulativeUsage.totalTokens += usage.totalTokens || 0;
             }
 
-            if (finishReason !== 'length') {
+            // AUTO-CONTINUE: Check if response seems incomplete
+            const isArtifactOpen = content.includes('<genesisArtifact') && !content.includes('</genesisArtifact>');
+            const isActionOpen = content.includes('<genesisAction') && !content.includes('</genesisAction');
+            const hasUnclosedTags = content.includes('<genesisArtifact') && 
+              (content.match(/<genesisArtifact/g) || []).length > (content.match(/<\/genesisArtifact>/g) || []).length;
+            const hasNoStartAction = !content.includes('type="start"') && !content.includes("type='start'");
+            const hasFilesButNoRun = content.includes('type="file"') && !content.includes('npm run dev');
+            const responseLength = content.length;
+            const isVeryShort = responseLength < 500;
+            
+            // Response is incomplete if:
+            // - Artifact tags are unclosed
+            // - Has files but no npm run dev (forgot to start)
+            // - Response is very short (AI gave up early)
+            const isIncomplete = isArtifactOpen || isActionOpen || hasUnclosedTags || (hasNoStartAction && hasFilesButNoRun);
+            
+            const shouldContinue = (finishReason === 'length' || isIncomplete) && stream.switches < MAX_RESPONSE_SEGMENTS;
+
+            if (!shouldContinue) {
+              // Response is complete — write usage and return
               dataStream.writeMessageAnnotation({
                 type: 'usage',
                 value: {
@@ -269,8 +289,6 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
                 message: 'Response Generated',
               } satisfies ProgressAnnotation);
               await new Promise((resolve) => setTimeout(resolve, 0));
-
-              // stream.close();
               return;
             }
 

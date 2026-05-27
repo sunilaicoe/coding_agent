@@ -17,8 +17,8 @@ export class StreamRecoveryManager {
 
   constructor(private _options: StreamRecoveryOptions = {}) {
     this._options = {
-      maxRetries: 3,
-      timeout: 120000, // 120 seconds default — give AI time for long responses
+      maxRetries: 10,
+      timeout: 600000, // 10 minutes — long AI responses for big projects
       ..._options,
     };
   }

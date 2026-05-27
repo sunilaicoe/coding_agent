@@ -40,7 +40,7 @@ function getCompletionTokenLimit(modelDetails: any): number {
   }
 
   // 3. Final fallback to MAX_TOKENS, but cap at reasonable limit for safety
-  return Math.min(MAX_TOKENS, 16384);
+  return Math.min(MAX_TOKENS, 65536);
 }
 
 function sanitizeText(text: string): string {
@@ -140,7 +140,7 @@ export async function streamText(props: {
     }
   }
 
-  const dynamicMaxTokens = modelDetails ? getCompletionTokenLimit(modelDetails) : Math.min(MAX_TOKENS, 16384);
+  const dynamicMaxTokens = modelDetails ? getCompletionTokenLimit(modelDetails) : Math.min(MAX_TOKENS, 65536);
 
   // Use model-specific limits directly - no artificial cap needed
   const safeMaxTokens = dynamicMaxTokens;
@@ -260,6 +260,9 @@ export async function streamText(props: {
 
     // Set temperature to 1 for reasoning models (required by OpenAI API)
     ...(isReasoning ? { temperature: 1 } : {}),
+
+    // Long timeout for big projects — never abort prematurely
+    abortSignal: AbortSignal.timeout(3600000), // 1 hour max
   };
 
   return await _streamText(streamParams);
