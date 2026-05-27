@@ -39,6 +39,55 @@ export function Chat() {
   const title = useStore(description);
   useEffect(() => {
     workbenchStore.setReloadedMessages(initialMessages.map((m) => m.id));
+
+    // On reload with existing messages, ensure workbench shows and dev server restarts
+    if (initialMessages.length > 0) {
+      workbenchStore.showWorkbench.set(true);
+
+      // Auto-restart dev server after reload (WebContainer is fresh)
+      const autoRestart = async () => {
+        try {
+          const { webcontainer } = await import('~/lib/webcontainer');
+          const wc = await webcontainer;
+
+          // Wait a bit for file replay to complete
+          await new Promise((r) => setTimeout(r, 5000));
+
+          // Check if dev server is already running
+          const previews = workbenchStore.previews.get();
+          if (previews.length > 0 && previews.some((p) => p.ready)) {
+            console.log('[Reload] Preview already running — no restart needed');
+            return;
+          }
+
+          // Check if package.json exists
+          try {
+            await wc.fs.readFile('package.json', 'utf-8');
+          } catch {
+            console.log('[Reload] No package.json — skipping dev server restart');
+            return;
+          }
+
+          console.log('[Reload] Restarting dev server...');
+          const terminal = workbenchStore.genesisTerminal();
+          if (!terminal || !terminal.process) {
+            console.warn('[Reload] No terminal available');
+            return;
+          }
+
+          await terminal.ready();
+
+          // Install and start
+          await terminal.executeCommand(`reload-install-${Date.now()}`, 'npm install', () => {});
+          await new Promise((r) => setTimeout(r, 2000));
+          await terminal.executeCommand(`reload-start-${Date.now()}`, 'npm run dev', () => {});
+        } catch (error) {
+          console.error('[Reload] Auto-restart failed:', error);
+        }
+      };
+
+      autoRestart();
+    }
   }, [initialMessages]);
 
   return (
@@ -405,10 +454,12 @@ export const ChatImpl = memo(
         return;
       }
 
-      await Promise.all([
-        animate('#examples', { opacity: 0, display: 'none' }, { duration: 0.1 }),
-        animate('#intro', { opacity: 0, flex: 1 }, { duration: 0.2, ease: cubicEasingFn }),
-      ]);
+      // Animate intro out (examples div was removed, only intro remains)
+      try {
+        await animate('#intro', { opacity: 0, flex: 1 }, { duration: 0.2, ease: cubicEasingFn });
+      } catch {
+        // Element may not exist if already hidden
+      }
 
       chatStore.setKey('started', true);
 
