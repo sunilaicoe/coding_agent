@@ -44,13 +44,12 @@ export function Chat() {
     if (initialMessages.length > 0) {
       workbenchStore.showWorkbench.set(true);
 
-      // Auto-restart dev server after reload (WebContainer is fresh)
       const autoRestart = async () => {
         try {
           const { webcontainer } = await import('~/lib/webcontainer');
           const wc = await webcontainer;
 
-          // Wait a bit for file replay to complete
+          // Wait for file replay to complete
           await new Promise((r) => setTimeout(r, 5000));
 
           // Check if dev server is already running
@@ -64,7 +63,7 @@ export function Chat() {
           try {
             await wc.fs.readFile('package.json', 'utf-8');
           } catch {
-            console.log('[Reload] No package.json — skipping dev server restart');
+            console.log('[Reload] No package.json — skipping restart');
             return;
           }
 
@@ -249,6 +248,53 @@ export const ChatImpl = memo(
     useEffect(() => {
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
+
+    // AUTO-CONTINUE on reload: if last message is incomplete, send continue to AI
+    const hasAutoContinued = useRef(false);
+    useEffect(() => {
+      if (
+        hasAutoContinued.current ||
+        initialMessages.length === 0 ||
+        isLoading ||
+        !model ||
+        !provider
+      ) {
+        return;
+      }
+
+      // Check if last assistant message looks incomplete
+      const lastMsg = initialMessages[initialMessages.length - 1];
+      if (lastMsg?.role !== 'assistant') return;
+
+      const content = typeof lastMsg.content === 'string'
+        ? lastMsg.content
+        : Array.isArray(lastMsg.content)
+          ? lastMsg.content.find((p: any) => p.type === 'text')?.text || ''
+          : '';
+
+      // Incomplete if: unclosed tags, no start action, very short
+      const hasUnclosedArtifact = content.includes('<genesisArtifact') &&
+        (content.match(/<genesisArtifact/g) || []).length > (content.match(/<\/genesisArtifact>/g) || []).length;
+      const hasNoStartAction = !content.includes('type="start"');
+      const hasFileActions = content.includes('type="file"');
+      const hasNoNpmRunDev = !content.includes('npm run dev');
+      const isIncomplete = hasUnclosedArtifact || (hasFileActions && hasNoStartAction) || (hasFileActions && hasNoNpmRunDev);
+
+      if (!isIncomplete) return;
+
+      hasAutoContinued.current = true;
+      console.log('[Reload] Last message incomplete — auto-continuing AI...');
+
+      // Wait for WebContainer to be ready, then send continue
+      setTimeout(() => {
+        const continueMsg = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\nCRITICAL: You were reloaded. Your previous response was cut off. CONTINUE immediately from where you left off.\n\n1. Do NOT repeat any code already written\n2. Continue writing the remaining files\n3. ALWAYS end with:\n   <genesisAction type="shell">npm install</genesisAction>\n   <genesisAction type="start">npm run dev</genesisAction>\n\nContinue now.`;
+
+        append({
+          role: 'user',
+          content: continueMsg,
+        });
+      }, 3000);
+    }, [initialMessages, isLoading, model, provider, append]);
 
     useEffect(() => {
       processSampledMessages({
