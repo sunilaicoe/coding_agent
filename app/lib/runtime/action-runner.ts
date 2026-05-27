@@ -6,6 +6,7 @@ import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
 import type { GenesisShell } from '~/utils/shell';
+import { previewErrorFixer } from '~/lib/stores/preview-error-fixer';
 
 const logger = createScopedLogger('ActionRunner');
 
@@ -203,12 +204,20 @@ export class ActionRunner {
 
                 this.#updateAction(actionId, { status: 'failed', error: 'Dev server failed to start' });
 
+                // Feed terminal error into auto-fix system so AI can fix it
+                previewErrorFixer.addTerminalError({
+                  command: action.content || 'npm run dev',
+                  output: err instanceof ActionCommandError ? err.output : err.message,
+                  exitCode: 1,
+                  timestamp: Date.now(),
+                });
+
                 if (err instanceof ActionCommandError) {
                   this.onAlert?.({
                     type: 'error',
                     title: 'Dev Server Failed',
                     description: err.header,
-                    content: err.output + '\n\n💡 The system will keep retrying. The AI will also try to fix this.',
+                    content: err.output + '\n\n💡 Auto-fixing: Sending error to AI for automatic correction...',
                   });
                 }
               });
@@ -240,12 +249,20 @@ export class ActionRunner {
         this.#updateAction(actionId, { status: 'failed', error: 'Action failed' });
         logger.error(`[${action.type}]:Action failed after ${attempt + 1} attempts\n\n`, error);
 
+        // Feed terminal error into auto-fix system so AI can fix it
+        previewErrorFixer.addTerminalError({
+          command: action.content || 'unknown',
+          output: error instanceof ActionCommandError ? error.output : String(error),
+          exitCode: 1,
+          timestamp: Date.now(),
+        });
+
         if (error instanceof ActionCommandError) {
           this.onAlert?.({
             type: 'error',
             title: error.header || 'Shell Command Failed',
             description: error.header,
-            content: error.output,
+            content: error.output + '\n\n💡 Auto-fixing: Sending error to AI...',
           });
         }
 

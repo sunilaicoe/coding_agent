@@ -7,6 +7,13 @@ export interface PreviewError {
   timestamp: number;
 }
 
+export interface TerminalError {
+  command: string;
+  output: string;
+  exitCode: number;
+  timestamp: number;
+}
+
 const MAX_AUTO_FIX_RETRIES = 100;
 const MAX_VERIFICATION_ROUNDS = 25;
 const VERIFICATION_INTERVAL = 4000; // 4 seconds between checks
@@ -15,10 +22,12 @@ type VerificationStatus = 'idle' | 'building' | 'verifying' | 'fixing' | 'passed
 
 class PreviewErrorFixer {
   errors = atom<PreviewError[]>([]);
+  terminalErrors = atom<TerminalError[]>([]);
   autoFixEnabled = atom<boolean>(true);
   retryCount = atom<number>(0);
   isFixing = atom<boolean>(false);
   lastFixedAt = atom<number>(0);
+  needsRestart = atom<boolean>(false);
 
   // Verification system
   verificationStatus = atom<VerificationStatus>('idle');
@@ -52,11 +61,30 @@ class PreviewErrorFixer {
     this._addLog(`ERROR: ${error.message.substring(0, 80)}`);
   }
 
+  addTerminalError(error: TerminalError) {
+    const current = this.terminalErrors.get();
+
+    // Deduplicate
+    const isDuplicate = current.some(
+      (e) => e.command === error.command && error.timestamp - e.timestamp < 5000,
+    );
+
+    if (isDuplicate) {
+      return;
+    }
+
+    this.terminalErrors.set([...current, error]);
+    this.needsRestart.set(true);
+    this.verificationErrors.set(this.verificationErrors.get() + 1);
+    this._addLog(`TERMINAL ERROR: ${error.command} → ${error.output.substring(0, 80)}`);
+  }
+
   canAutoFix(): boolean {
     return (
       this.autoFixEnabled.get() &&
       this.retryCount.get() < this._maxRetries &&
-      !this.isFixing.get()
+      !this.isFixing.get() &&
+      (this.errors.get().length > 0 || this.terminalErrors.get().length > 0)
     );
   }
 
@@ -75,12 +103,16 @@ class PreviewErrorFixer {
   markFixed() {
     this.lastFixedAt.set(Date.now());
     this.errors.set([]);
+    this.terminalErrors.set([]);
+    this.needsRestart.set(false);
   }
 
   reset() {
     this.errors.set([]);
+    this.terminalErrors.set([]);
     this.retryCount.set(0);
     this.isFixing.set(false);
+    this.needsRestart.set(false);
     this.stopVerification();
     this.verificationStatus.set('idle');
     this.verificationRound.set(0);
@@ -97,29 +129,59 @@ class PreviewErrorFixer {
   }
 
   formatErrorForAI(): string {
-    const lastError = this.getLastError();
-    if (!lastError) return '';
+    const terminalErrors = this.terminalErrors.get();
+    const previewErrors = this.errors.get();
+    const lastTerminalError = terminalErrors.length > 0 ? terminalErrors[terminalErrors.length - 1] : undefined;
+    const lastPreviewError = previewErrors.length > 0 ? previewErrors[previewErrors.length - 1] : undefined;
 
-    return `AUTO-FIX: Preview Error Detected (attempt ${this.retryCount.get() + 1}/${this._maxRetries})
+    if (!lastTerminalError && !lastPreviewError) return '';
 
-THE PROJECT YOU BUILT is showing this error in the browser preview:
+    let errorSection = '';
 
-Error: ${lastError.message}
+    if (lastTerminalError) {
+      errorSection = `TERMINAL ERROR (command failed):
+
+Command: ${lastTerminalError.command}
+Exit Code: ${lastTerminalError.exitCode}
+Output:
+${lastTerminalError.output}
+
+ANALYSIS:
+This is a terminal/shell error. The application failed to build or start.
+Common causes:
+- Missing dependencies (npm install needed)
+- Invalid package.json or vite.config
+- Missing files referenced in imports
+- Syntax errors in source files
+- Wrong file paths or extensions
+
+YOUR TASK:
+1. Diagnose the root cause from the error output above
+2. Fix ALL source files that caused this error
+3. Ensure package.json has correct dependencies and scripts
+4. After fixing, output the corrected files using genesisAction tags
+5. End with: <genesisAction type="start">npm run dev</genesisAction>`;
+    } else if (lastPreviewError) {
+      errorSection = `BROWSER PREVIEW ERROR:
+
+Error: ${lastPreviewError.message}
 
 Stack trace:
-${lastError.stack}
+${lastPreviewError.stack}
+
+YOUR TASK:
+1. Fix the specific error (missing import, undefined variable, syntax error, etc.)
+2. Check ALL other files for similar issues
+3. Look at the project as a whole and improve it`;
+    }
+
+    return `AUTO-FIX: Error Detected (attempt ${this.retryCount.get() + 1}/${this._maxRetries})
+
+${errorSection}
 
 VERIFICATION STATUS: Round ${this.verificationRound.get()}/${MAX_VERIFICATION_ROUNDS}, ${this.verificationCleanStreak.get()} consecutive clean checks, ${this.verificationErrors.get()} errors found, ${this.verificationFixes.get()} fixes applied.
 
-Fix this error in the project code. Then STUDY the entire project:
-
-1. Fix the specific error (missing import, undefined variable, syntax error, etc.)
-2. After fixing, check ALL other files for similar issues
-3. Look at the project as a whole — can you improve anything?
-4. Is there a feature you could add right now to make the project better?
-5. Add at least ONE improvement or new feature along with the fix
-
-Provide the corrected files. Make the project better than before.`;
+Fix this error. Provide the corrected files using genesisAction tags.`;
   }
 
   // ========================================

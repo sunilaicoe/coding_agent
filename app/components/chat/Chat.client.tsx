@@ -261,12 +261,15 @@ export const ChatImpl = memo(
     }, [messages, isLoading, parseMessages]);
 
     const previewErrors = useStore(previewErrorFixer.errors);
+    const terminalErrors = useStore(previewErrorFixer.terminalErrors);
     const previewRetryCount = useStore(previewErrorFixer.retryCount);
 
-    // AUTO-FIX: Watch for preview errors and automatically send them to the AI
+    // AUTO-FIX: Watch for ANY errors (preview + terminal) and automatically send them to the AI
     useEffect(() => {
+      const hasErrors = previewErrors.length > 0 || terminalErrors.length > 0;
+
       if (
-        previewErrors.length === 0 ||
+        !hasErrors ||
         !previewErrorFixer.canAutoFix() ||
         !chatStarted ||
         isLoading ||
@@ -290,24 +293,55 @@ export const ChatImpl = memo(
         // Clear the alert since we're handling it
         workbenchStore.clearAlert();
 
-        const fixMessage = `[Model: ${model}]\n\n[Provider: ${provider.name}]\n\n${errorMsg}`;
+        const fixMessage = `[Model: \${model}]\n\n[Provider: \${provider.name}]\n\n\${errorMsg}`;
 
-        console.log(`AUTO-FIX: Sending preview error to AI (attempt ${previewErrorFixer.retryCount.get()})`);
+        const errorType = terminalErrors.length > 0 ? 'TERMINAL' : 'PREVIEW';
+        console.log(`AUTO-FIX: Sending \${errorType} error to AI (attempt \${previewErrorFixer.retryCount.get()})`);
 
         append({
           role: 'user',
           content: fixMessage,
         });
 
-        // Mark as fixed after a delay to allow the AI to respond
+        // Mark as fixed after a delay to allow the AI to respond and files to be written
+        const hadTerminalErrors = terminalErrors.length > 0;
         setTimeout(() => {
           previewErrorFixer.setFixing(false);
           previewErrorFixer.markFixed();
+
+          // If this was a terminal error, restart the dev server after AI fixes files
+          if (hadTerminalErrors) {
+            console.log('[AUTO-FIX] Terminal error fixed \u2014 restarting dev server in 10s...');
+            setTimeout(async () => {
+              try {
+                const { webcontainer } = await import('~/lib/webcontainer');
+                const wc = await webcontainer;
+                const terminal = workbenchStore.genesisTerminal();
+                if (!terminal || !terminal.process) return;
+                await terminal.ready();
+
+                // Check if dev server is already running
+                const previews = workbenchStore.previews.get();
+                if (previews.length > 0 && previews.some((p) => p.ready)) {
+                  console.log('[AUTO-FIX] Preview already running \u2014 no restart needed');
+                  return;
+                }
+
+                console.log('[AUTO-FIX] Running npm install...');
+                await terminal.executeCommand(`autofix-install-\${Date.now()}`, 'npm install', () => {});
+                await new Promise((r) => setTimeout(r, 2000));
+                console.log('[AUTO-FIX] Starting dev server...');
+                await terminal.executeCommand(`autofix-start-\${Date.now()}`, 'npm run dev', () => {});
+              } catch (e) {
+                console.error('[AUTO-FIX] Restart failed:', e);
+              }
+            }, 10000);
+          }
         }, 5000);
       }, 2000); // 2 second delay to let the error settle
 
       return () => clearTimeout(timer);
-    }, [previewErrors, previewRetryCount, chatStarted, isLoading, model, provider]);
+    }, [previewErrors, terminalErrors, previewRetryCount, chatStarted, isLoading, model, provider]);
 
     // VERIFICATION: Start 25-round testing when preview first appears
     const previews = useStore(workbenchStore.previews);
