@@ -51,7 +51,7 @@ export class EnhancedStreamingMessageParser extends StreamingMessageParser {
   }
 
   private _hasDetectedArtifacts(input: string): boolean {
-    return input.includes('<boltArtifact') || input.includes('</boltArtifact>');
+    return input.includes('<genesisArtifact') || input.includes('</genesisArtifact>');
   }
 
   private _detectAndWrapCodeBlocks(messageId: string, input: string): string {
@@ -204,11 +204,11 @@ export class EnhancedStreamingMessageParser extends StreamingMessageParser {
   private _wrapInArtifact(artifactId: string, filePath: string, content: string): string {
     const title = filePath.split('/').pop() || 'File';
 
-    return `<boltArtifact id="${artifactId}" title="${title}">
-<boltAction type="file" filePath="${filePath}">
+    return `<genesisArtifact id="${artifactId}" title="${title}">
+<genesisAction type="file" filePath="${filePath}">
 ${content}
-</boltAction>
-</boltArtifact>`;
+</genesisAction>
+</genesisArtifact>`;
   }
 
   private _wrapInShellAction(content: string, messageId: string): string {
@@ -217,11 +217,11 @@ ${content}
     // Auto-fix incompatible commands before wrapping
     let fixedContent = this._rewriteIncompatibleCommands(content.trim());
 
-    return `<boltArtifact id="${artifactId}" title="Shell Command" type="shell">
-<boltAction type="shell">
+    return `<genesisArtifact id="${artifactId}" title="Shell Command" type="shell">
+<genesisAction type="shell">
 ${fixedContent}
-</boltAction>
-</boltArtifact>`;
+</genesisAction>
+</genesisArtifact>`;
   }
 
   private _rewriteIncompatibleCommands(command: string): string {

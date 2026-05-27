@@ -11,17 +11,15 @@ html,
 body {
   height: 100%;
   width: 100%;
-  background-color: var(--bolt-elements-bg-depth-1);
+  background-color: var(--genesis-elements-bg-depth-1);
 }
 
 :root {
   --gradient-opacity: 0.8;
-  --primary-color: rgba(158, 117, 240, var(--gradient-opacity));
-  --secondary-color: rgba(138, 43, 226, var(--gradient-opacity));
-  --accent-color: rgba(128, 59, 239, var(--gradient-opacity));
-  // --primary-color: rgba(147, 112, 219, var(--gradient-opacity));
-  // --secondary-color: rgba(138, 43, 226, var(--gradient-opacity));
-  // --accent-color: rgba(180, 170, 220, var(--gradient-opacity));
+  /* Genesis teal color scheme — zero purple */
+  --primary-color: rgba(15, 118, 110, var(--gradient-opacity));
+  --secondary-color: rgba(13, 148, 136, var(--gradient-opacity));
+  --accent-color: rgba(20, 184, 166, var(--gradient-opacity));
 }
 
 .modern-scrollbar {
@@ -60,14 +58,14 @@ body {
 .modern-scrollbar-invert {
   &::-webkit-scrollbar-thumb {
     // Override with a contrasting color, e.g., primary text color with transparency
-    background-color: color-mix(in srgb, var(--bolt-elements-textPrimary), transparent 70%);
+    background-color: color-mix(in srgb, var(--genesis-elements-textPrimary), transparent 70%);
   }
 
   &::-webkit-scrollbar-thumb:hover {
     // Darker/more opaque version on hover
-    background-color: color-mix(in srgb, var(--bolt-elements-textPrimary), transparent 50%);
+    background-color: color-mix(in srgb, var(--genesis-elements-textPrimary), transparent 50%);
   }
 
   // Firefox support for inverted colors
-  scrollbar-color: color-mix(in srgb, var(--bolt-elements-textPrimary), transparent 50%) transparent;
+  scrollbar-color: color-mix(in srgb, var(--genesis-elements-textPrimary), transparent 50%) transparent;
 }

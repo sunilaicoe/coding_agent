@@ -1,24 +1,24 @@
 import type { WebContainer } from '@webcontainer/api';
 import { path as nodePath } from '~/utils/path';
 import { atom, map, type MapStore } from 'nanostores';
-import type { ActionAlert, BoltAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
+import type { ActionAlert, GenesisAction, DeployAlert, FileHistory, SupabaseAction, SupabaseAlert } from '~/types/actions';
 import { createScopedLogger } from '~/utils/logger';
 import { unreachable } from '~/utils/unreachable';
 import type { ActionCallbackData } from './message-parser';
-import type { BoltShell } from '~/utils/shell';
+import type { GenesisShell } from '~/utils/shell';
 
 const logger = createScopedLogger('ActionRunner');
 
 export type ActionStatus = 'pending' | 'running' | 'complete' | 'aborted' | 'failed';
 
-export type BaseActionState = BoltAction & {
+export type BaseActionState = GenesisAction & {
   status: Exclude<ActionStatus, 'failed'>;
   abort: () => void;
   executed: boolean;
   abortSignal: AbortSignal;
 };
 
-export type FailedActionState = BoltAction &
+export type FailedActionState = GenesisAction &
   Omit<BaseActionState, 'status'> & {
     status: Extract<ActionStatus, 'failed'>;
     error: string;
@@ -66,7 +66,7 @@ class ActionCommandError extends Error {
 export class ActionRunner {
   #webcontainer: Promise<WebContainer>;
   #currentExecutionPromise: Promise<void> = Promise.resolve();
-  #shellTerminal: () => BoltShell;
+  #shellTerminal: () => GenesisShell;
   runnerId = atom<string>(`${Date.now()}`);
   actions: ActionsMap = map({});
   onAlert?: (alert: ActionAlert) => void;
@@ -76,7 +76,7 @@ export class ActionRunner {
 
   constructor(
     webcontainerPromise: Promise<WebContainer>,
-    getShellTerminal: () => BoltShell,
+    getShellTerminal: () => GenesisShell,
     onAlert?: (alert: ActionAlert) => void,
     onSupabaseAlert?: (alert: SupabaseAlert) => void,
     onDeployAlert?: (alert: DeployAlert) => void,
@@ -154,7 +154,7 @@ export class ActionRunner {
     this.#updateAction(actionId, { status: 'running' });
 
     // Auto-retry configuration
-    const maxRetries = action.type === 'shell' ? 2 : 0;
+    const maxRetries = action.type === 'shell' ? 5 : 0;
     let lastError: any = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -199,19 +199,18 @@ export class ActionRunner {
                   return;
                 }
 
-                this.#updateAction(actionId, { status: 'failed', error: 'Action failed' });
-                logger.error(`[${action.type}]:Action failed\n\n`, err);
+                logger.error(`[${action.type}]:Start action failed after all retries\n\n`, err);
 
-                if (!(err instanceof ActionCommandError)) {
-                  return;
+                this.#updateAction(actionId, { status: 'failed', error: 'Dev server failed to start' });
+
+                if (err instanceof ActionCommandError) {
+                  this.onAlert?.({
+                    type: 'error',
+                    title: 'Dev Server Failed',
+                    description: err.header,
+                    content: err.output + '\n\n💡 The system will keep retrying. The AI will also try to fix this.',
+                  });
                 }
-
-                this.onAlert?.({
-                  type: 'error',
-                  title: 'Dev Server Failed',
-                  description: err.header,
-                  content: err.output,
-                });
               });
 
             await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -300,7 +299,7 @@ export class ActionRunner {
 
   async #runStartAction(action: ActionState) {
     if (action.type !== 'start') {
-      unreachable('Expected shell action');
+      unreachable('Expected start action');
     }
 
     if (!this.#shellTerminal) {
@@ -314,17 +313,74 @@ export class ActionRunner {
       unreachable('Shell terminal not found');
     }
 
-    const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
-      logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
-      action.abort();
-    });
-    logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
+    // Check if AI already ran npm install as a separate shell action
+    const actions = this.actions.get();
+    const hasInstallAction = Object.values(actions).some(
+      (a: any) => a.type === 'shell' && a.content?.includes('npm install'),
+    );
 
-    if (resp?.exitCode != 0) {
-      throw new ActionCommandError('Failed To Start Application', resp?.output || 'No Output Available');
+    const maxAttempts = 3;
+    let lastOutput = '';
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        logger.info(`[Start] Retry attempt ${attempt}/${maxAttempts}`);
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+
+      // If AI already ran npm install, just try starting directly
+      // The shell.ts lock will ensure we wait for it to finish
+      const resp = await shell.executeCommand(this.runnerId.get(), action.content, () => {
+        logger.debug(`[${action.type}]:Aborting Action\n\n`, action);
+        action.abort();
+      });
+      logger.debug(`${action.type} Shell Response: [exit code:${resp?.exitCode}]`);
+
+      if (resp?.exitCode === 0 || resp?.exitCode === null) {
+        // null exitCode means process is still running (dev server)
+        return resp;
+      }
+
+      lastOutput = resp?.output || '';
+
+      // Only auto npm install if AI did NOT already do it
+      if (!hasInstallAction && (lastOutput.includes('command not found') || lastOutput.includes('not recognized'))) {
+        logger.info('[Start] Vite not found — running npm install...');
+
+        this.onAlert?.({
+          type: 'info',
+          title: 'Installing Dependencies',
+          description: 'vite not found — running npm install automatically...',
+          content: '',
+        });
+
+        try {
+          await shell.executeCommand(this.runnerId.get(), 'npm install', () => {});
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } catch (installError) {
+          logger.error('[Start] npm install error:', installError);
+        }
+
+        continue;
+      }
+
+      if (!hasInstallAction && (lastOutput.includes('ENOENT') || lastOutput.includes('Cannot find module'))) {
+        logger.info('[Start] Module not found — running npm install...');
+        try {
+          await shell.executeCommand(this.runnerId.get(), 'npm install', () => {});
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } catch (e) {
+          logger.error('[Start] npm install error:', e);
+        }
+        continue;
+      }
+
+      // Other error — retry
+      logger.warn(`[Start] Dev server failed (attempt ${attempt + 1})`);
     }
 
-    return resp;
+    // All retries exhausted
+    throw new ActionCommandError('Failed To Start Application', lastOutput || 'No Output Available');
   }
 
   async #runFileAction(action: ActionState) {

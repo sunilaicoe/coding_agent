@@ -110,8 +110,8 @@ export class WorkbenchStore {
   get showTerminal() {
     return this.#terminalStore.showTerminal;
   }
-  get boltTerminal() {
-    return this.#terminalStore.boltTerminal;
+  get genesisTerminal() {
+    return this.#terminalStore.genesisTerminal;
   }
   get alert() {
     return this.actionAlert;
@@ -143,8 +143,8 @@ export class WorkbenchStore {
   attachTerminal(terminal: ITerminal) {
     this.#terminalStore.attachTerminal(terminal);
   }
-  attachBoltTerminal(terminal: ITerminal) {
-    this.#terminalStore.attachBoltTerminal(terminal);
+  attachGenesisTerminal(terminal: ITerminal) {
+    this.#terminalStore.attachGenesisTerminal(terminal);
   }
 
   detachTerminal(terminal: ITerminal) {
@@ -523,7 +523,7 @@ export class WorkbenchStore {
       type,
       runner: new ActionRunner(
         webcontainer,
-        () => this.boltTerminal,
+        () => this.genesisTerminal,
         (alert) => {
           if (this.#reloadedMessages.has(messageId)) {
             return;
@@ -565,6 +565,8 @@ export class WorkbenchStore {
     // Auto-start fallback: When artifact closes, check if we need to start dev server
     if (state.closed === true) {
       this.#autoStartIfNeeded(artifactId);
+      // Start a watchdog: if preview doesn't appear in 30s, retry install + start
+      this.#startPreviewWatchdog(artifactId);
     }
   }
 
@@ -582,9 +584,12 @@ export class WorkbenchStore {
       const hasStartAction = Object.values(actions).some(
         (a: any) => a.type === 'start' || (a.type === 'shell' && a.content?.includes('run dev')),
       );
+      const hasInstallAction = Object.values(actions).some(
+        (a: any) => a.type === 'shell' && a.content?.includes('npm install'),
+      );
 
       if (hasStartAction) {
-        console.log('[Workbench] Start action already exists, skipping auto-start');
+        console.log('[Workbench] Start action exists — skipping auto-start');
         return;
       }
 
@@ -599,26 +604,98 @@ export class WorkbenchStore {
 
       console.log('[Workbench] No start action detected — auto-starting dev server...');
 
-      const terminal = this.boltTerminal();
+      const terminal = this.genesisTerminal();
       if (!terminal || !terminal.process) {
         console.warn('[Workbench] No terminal available for auto-start');
         return;
       }
 
       await terminal.ready();
-      const result = await terminal.executeCommand(
-        `auto-start-${Date.now()}`,
-        'npm install && npm run dev',
-        () => {},
-      );
 
-      if (result?.exitCode !== 0 && result?.exitCode !== null) {
+      // Only run npm install if the AI didn't already do it
+      if (!hasInstallAction) {
+        console.log('[Workbench] No install action found — running npm install...');
+        await terminal.executeCommand(
+          `auto-install-${Date.now()}`,
+          'npm install',
+          () => {},
+        );
+        await new Promise((r) => setTimeout(r, 3000));
+      } else {
+        console.log('[Workbench] Install action already ran — just starting dev server');
+        // Give npm install from the AI a moment to finish
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+
+      // Start dev server (with retry)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          console.log(`[Workbench] Auto-start retry ${attempt}/3`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+
+        const result = await terminal.executeCommand(
+          `auto-start-${Date.now()}`,
+          'npm run dev',
+          () => {},
+        );
+
+        // exitCode null means process is still running (dev server started!)
+        if (result?.exitCode === null || result?.exitCode === 0) {
+          console.log('[Workbench] Auto-start succeeded!');
+          return;
+        }
+
+        const output = result?.output || '';
+        if (output.includes('command not found')) {
+          console.warn('[Workbench] Vite not found — running npm install...');
+          await terminal.executeCommand(`auto-fix-install-${Date.now()}`, 'npm install', () => {});
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+
         console.warn('[Workbench] Auto-start exited with code:', result?.exitCode);
       }
+
+      console.error('[Workbench] Auto-start failed after 3 attempts');
     } catch (error) {
       console.error('[Workbench] Auto-start failed:', error);
     }
   }
+  /**
+   * Preview watchdog: Monitors if the preview appears within 30 seconds.
+   * If not, runs a single npm install + npm run dev attempt.
+   */
+  async #startPreviewWatchdog(artifactId: string) {
+    // Wait 30 seconds
+    await new Promise((r) => setTimeout(r, 30000));
+
+    // Check if preview has appeared
+    const previews = this.previews.get();
+    if (previews.length > 0 && previews.some((p) => p.ready)) {
+      console.log('[Watchdog] Preview detected. Watchdog stopped.');
+      return;
+    }
+
+    console.warn('[Watchdog] No preview after 30s — attempting recovery...');
+
+    try {
+      const terminal = this.genesisTerminal();
+      if (!terminal || !terminal.process) return;
+
+      await terminal.ready();
+
+      // Single clean install attempt
+      await terminal.executeCommand(`watchdog-clean-${Date.now()}`, 'rm -rf node_modules package-lock.json', () => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      await terminal.executeCommand(`watchdog-install-${Date.now()}`, 'npm install', () => {});
+      await new Promise((r) => setTimeout(r, 3000));
+      await terminal.executeCommand(`watchdog-start-${Date.now()}`, 'npm run dev', () => {});
+    } catch (error) {
+      console.error('[Watchdog] Recovery failed:', error);
+    }
+  }
+
   addAction(data: ActionCallbackData) {
     // this._addAction(data);
 

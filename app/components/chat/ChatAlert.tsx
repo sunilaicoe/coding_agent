@@ -50,7 +50,7 @@ export default function ChatAlert({ alert, clearAlert, postMessage }: Props) {
             {isPassed ? (
               <div className="i-ph:check-circle-duotone text-xl text-green-500" />
             ) : (
-              <div className="i-ph:warning-duotone text-xl text-bolt-elements-button-danger-text" />
+              <div className="i-ph:warning-duotone text-xl text-genesis-elements-button-danger-text" />
             )}
           </motion.div>
 

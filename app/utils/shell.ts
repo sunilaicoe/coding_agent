@@ -91,7 +91,7 @@ export async function newShellProcess(webcontainer: WebContainer, terminal: ITer
 
 export type ExecutionResult = { output: string; exitCode: number } | undefined;
 
-export class BoltShell {
+export class GenesisShell {
   #initialized: (() => void) | undefined;
   #readyPromise: Promise<void>;
   #webcontainer: WebContainer | undefined;
@@ -118,7 +118,7 @@ export class BoltShell {
     this.#terminal = terminal;
 
     // Use all three streams from tee: one for terminal, one for command execution, one for Expo URL detection
-    const { process, commandStream, expoUrlStream } = await this.newBoltShellProcess(webcontainer, terminal);
+    const { process, commandStream, expoUrlStream } = await this.newGenesisShellProcess(webcontainer, terminal);
     this.#process = process;
     this.#outputStream = commandStream.getReader();
 
@@ -129,7 +129,7 @@ export class BoltShell {
     this.#initialized?.();
   }
 
-  async newBoltShellProcess(webcontainer: WebContainer, terminal: ITerminal) {
+  async newGenesisShellProcess(webcontainer: WebContainer, terminal: ITerminal) {
     const args: string[] = [];
     const process = await webcontainer.spawn('/bin/jsh', ['--osc', ...args], {
       terminal: {
@@ -215,7 +215,65 @@ export class BoltShell {
     return this.#process;
   }
 
+  // Lock to prevent duplicate npm install commands
+  static #installLock = false;
+  static #installPromise: Promise<void> | null = null;
+
   async executeCommand(sessionId: string, command: string, abort?: () => void): Promise<ExecutionResult> {
+    if (!this.process || !this.terminal) {
+      return undefined;
+    }
+
+    const trimmedCommand = command.trim();
+
+    // SPECIAL HANDLING: npm install
+    // Only ONE npm install can run at a time. All others wait.
+    if (trimmedCommand === 'npm install' || trimmedCommand.includes('npm install &&')) {
+      if (GenesisShell.#installLock && GenesisShell.#installPromise) {
+        console.log(`[Shell] npm install already running — waiting for it to finish (session: ${sessionId})`);
+        await GenesisShell.#installPromise;
+        console.log(`[Shell] npm install completed — proceeding (session: ${sessionId})`);
+        // install is done, return success
+        return { output: 'npm install completed (shared)', exitCode: 0 };
+      }
+
+      // We are the first npm install — acquire lock
+      GenesisShell.#installLock = true;
+      console.log(`[Shell] Starting npm install (session: ${sessionId})`);
+
+      // Create a promise that resolves when install finishes
+      let resolveInstall: () => void;
+      GenesisShell.#installPromise = new Promise<void>((resolve) => {
+        resolveInstall = resolve;
+      });
+
+      try {
+        const result = await this._executeCommandInternal(sessionId, trimmedCommand, abort);
+        return result;
+      } finally {
+        GenesisShell.#installLock = false;
+        GenesisShell.#installPromise = null;
+        resolveInstall!();
+        console.log(`[Shell] npm install finished (session: ${sessionId})`);
+      }
+    }
+
+    // SPECIAL HANDLING: npm run dev / start commands
+    // Wait for any pending npm install to finish first
+    if (trimmedCommand.includes('npm run dev') || trimmedCommand.includes('vite')) {
+      if (GenesisShell.#installLock && GenesisShell.#installPromise) {
+        console.log(`[Shell] Waiting for npm install before starting dev server (session: ${sessionId})`);
+        await GenesisShell.#installPromise;
+        // Small delay to let file system settle
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+
+    // Default: execute normally
+    return this._executeCommandInternal(sessionId, trimmedCommand, abort);
+  }
+
+  async _executeCommandInternal(sessionId: string, command: string, abort?: () => void): Promise<ExecutionResult> {
     if (!this.process || !this.terminal) {
       return undefined;
     }
@@ -228,13 +286,21 @@ export class BoltShell {
 
     /*
      * interrupt the current execution
-     *  this.#shellInputStream?.write('\x03');
+     * Only interrupt if the current execution is NOT npm install
      */
-    this.terminal.input('\x03');
-    await this.waitTillOscCode('prompt');
-
-    if (state && state.executionPrms) {
-      await state.executionPrms;
+    const currentIsInstall = state?.active && state.executionPrms;
+    if (!currentIsInstall) {
+      this.terminal.input('\x03');
+      await this.waitTillOscCode('prompt');
+    } else {
+      // Wait for current command to finish instead of killing it
+      if (state && state.executionPrms) {
+        try {
+          await state.executionPrms;
+        } catch {
+          // Previous command may have failed, that's ok
+        }
+      }
     }
 
     //start a new execution
@@ -379,6 +445,6 @@ export function cleanTerminalOutput(input: string): string {
     .replace(/\u0000/g, ''); // Remove null characters
 }
 
-export function newBoltShellProcess() {
-  return new BoltShell();
+export function newGenesisShellProcess() {
+  return new GenesisShell();
 }

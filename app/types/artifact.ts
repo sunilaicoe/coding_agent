@@ -1,4 +1,4 @@
-export interface BoltArtifactData {
+export interface GenesisArtifactData {
   id: string;
   title: string;
   type?: string | undefined;
