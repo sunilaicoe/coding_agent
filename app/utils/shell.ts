@@ -37,6 +37,16 @@ export async function newShellProcess(webcontainer: WebContainer, terminal: ITer
 
         terminal.write(data);
 
+        // Monitor terminal output for errors (vite not found, module not found, etc.)
+        try {
+          const cleanForMonitor = data.replace(/\x1b\[[0-9;]*[mGKHJ]/g, '').trim();
+          if (cleanForMonitor && cleanForMonitor.length > 10) {
+            import('~/lib/webcontainer/terminal-monitor').then(({ monitorTerminalOutput }) => {
+              monitorTerminalOutput(cleanForMonitor);
+            }).catch(() => {});
+          }
+        } catch {}
+
         // Capture terminal output for debugging
         try {
           import('~/utils/debugLogger')

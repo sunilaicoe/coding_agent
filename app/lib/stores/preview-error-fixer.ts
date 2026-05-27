@@ -1,4 +1,5 @@
 import { atom } from 'nanostores';
+import type { WebContainer } from '@webcontainer/api';
 
 export interface PreviewError {
   message: string;
@@ -128,7 +129,13 @@ class PreviewErrorFixer {
     return errors.length > 0 ? errors[errors.length - 1] : undefined;
   }
 
-  formatErrorForAI(): string {
+  #cachedIndex: string = '';
+  #indexTimestamp: number = 0;
+
+  /**
+   * Index the project and format error with full file context
+   */
+  async formatErrorForAIWithIndex(wc: WebContainer): Promise<string> {
     const terminalErrors = this.terminalErrors.get();
     const previewErrors = this.errors.get();
     const lastTerminalError = terminalErrors.length > 0 ? terminalErrors[terminalErrors.length - 1] : undefined;
@@ -136,52 +143,89 @@ class PreviewErrorFixer {
 
     if (!lastTerminalError && !lastPreviewError) return '';
 
-    let errorSection = '';
-
-    if (lastTerminalError) {
-      errorSection = `TERMINAL ERROR (command failed):
-
-Command: ${lastTerminalError.command}
-Exit Code: ${lastTerminalError.exitCode}
-Output:
-${lastTerminalError.output}
-
-ANALYSIS:
-This is a terminal/shell error. The application failed to build or start.
-Common causes:
-- Missing dependencies (npm install needed)
-- Invalid package.json or vite.config
-- Missing files referenced in imports
-- Syntax errors in source files
-- Wrong file paths or extensions
-
-YOUR TASK:
-1. Diagnose the root cause from the error output above
-2. Fix ALL source files that caused this error
-3. Ensure package.json has correct dependencies and scripts
-4. After fixing, output the corrected files using genesisAction tags
-5. End with: <genesisAction type="start">npm run dev</genesisAction>`;
-    } else if (lastPreviewError) {
-      errorSection = `BROWSER PREVIEW ERROR:
-
-Error: ${lastPreviewError.message}
-
-Stack trace:
-${lastPreviewError.stack}
-
-YOUR TASK:
-1. Fix the specific error (missing import, undefined variable, syntax error, etc.)
-2. Check ALL other files for similar issues
-3. Look at the project as a whole and improve it`;
+    // Build project index (use cache if less than 10s old)
+    let projectIndex = '';
+    try {
+      if (Date.now() - this.#indexTimestamp > 10000 || !this.#cachedIndex) {
+        const { indexProject, formatProjectIndex } = await import('~/utils/project-indexer');
+        const index = await indexProject(wc);
+        projectIndex = formatProjectIndex(index);
+        this.#cachedIndex = projectIndex;
+        this.#indexTimestamp = Date.now();
+        this._addLog('Indexed ' + index.totalFiles + ' files (' + Math.round(index.totalSize / 1024) + 'KB)');
+      } else {
+        projectIndex = this.#cachedIndex;
+      }
+    } catch (e) {
+      projectIndex = '(Failed to index project: ' + String(e) + ')';
     }
 
+    // Build error section
+    let errorSection = '';
+
+    // Collect ALL terminal errors (not just last)
+    if (terminalErrors.length > 0) {
+      const allTerminal = terminalErrors.map((e, i) =>
+        `--- Terminal Error ${i + 1} ---\nCommand: ${e.command}\nExit Code: ${e.exitCode}\nOutput:\n${e.output}`
+      ).join('\n\n');
+
+      errorSection = `TERMINAL ERRORS (${terminalErrors.length} total):
+
+${allTerminal}
+
+ANALYSIS:
+This is a terminal/shell error. The app failed to build or start.
+Common causes: missing deps, invalid config, missing files, syntax errors, wrong paths.`;
+    }
+
+    // Collect ALL preview errors
+    if (previewErrors.length > 0) {
+      const allPreview = previewErrors.map((e, i) =>
+        `--- Browser Error ${i + 1} ---\nError: ${e.message}\nPath: ${e.pathname}\nStack:\n${e.stack}`
+      ).join('\n\n');
+
+      if (errorSection) errorSection += '\n\n';
+      errorSection += `BROWSER PREVIEW ERRORS (${previewErrors.length} total):\n\n${allPreview}`;
+    }
+
+    // Build the FULL message: index + errors + instructions
     return `AUTO-FIX: Error Detected (attempt ${this.retryCount.get() + 1}/${this._maxRetries})
+
+========== CURRENT PROJECT FILES ==========
+
+${projectIndex}
+
+========== ERRORS TO FIX ==========
 
 ${errorSection}
 
-VERIFICATION STATUS: Round ${this.verificationRound.get()}/${MAX_VERIFICATION_ROUNDS}, ${this.verificationCleanStreak.get()} consecutive clean checks, ${this.verificationErrors.get()} errors found, ${this.verificationFixes.get()} fixes applied.
+========== FIX INSTRUCTIONS ==========
 
-Fix this error. Provide the corrected files using genesisAction tags.`;
+Read the project files above carefully.
+Find the root cause of EACH error.
+Fix ALL errors at once.
+Output the corrected files using genesisAction tags.
+ALWAYS end with:
+<genesisAction type="shell">npm install</genesisAction>
+<genesisAction type="start">npm run dev</genesisAction>`;
+  }
+
+  /**
+   * Synchronous fallback (no project index)
+   */
+  formatErrorForAI(): string {
+    const terminalErrors = this.terminalErrors.get();
+    const previewErrors = this.errors.get();
+    if (terminalErrors.length === 0 && previewErrors.length === 0) return '';
+    let msg = `AUTO-FIX: Error Detected (attempt ${this.retryCount.get() + 1}/${this._maxRetries})\n\n`;
+    if (terminalErrors.length > 0) {
+      msg += `TERMINAL ERROR: ${terminalErrors[terminalErrors.length - 1].output}\n`;
+    }
+    if (previewErrors.length > 0) {
+      msg += `BROWSER ERROR: ${previewErrors[previewErrors.length - 1].message}\n`;
+    }
+    msg += '\nFix this error. Output corrected files.';
+    return msg;
   }
 
   // ========================================

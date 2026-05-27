@@ -77,6 +77,7 @@ if (!import.meta.env.SSR) {
         return webcontainer;
       });
 
+
   if (import.meta.hot) {
     import.meta.hot.data.webcontainer = webcontainer;
   }

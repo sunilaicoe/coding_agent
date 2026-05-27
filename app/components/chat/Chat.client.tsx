@@ -261,41 +261,21 @@ export const ChatImpl = memo(
         const wc = await webcontainer;
         await new Promise((r) => setTimeout(r, 12000));
 
-        // Step 5: Scan actual project files
-        let rootFiles: string[] = [];
-        let srcFiles: string[] = [];
-        let componentFiles: string[] = [];
-        let pkgJson = '';
-        let appContent = '';
-
-        try {
-          const entries = await wc.fs.readdir('/home/project', { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isFile()) rootFiles.push(entry.name);
-          }
-        } catch {}
-        try {
-          const entries = await wc.fs.readdir('/home/project/src', { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isFile()) srcFiles.push(entry.name);
-          }
-        } catch {}
-        try {
-          const entries = await wc.fs.readdir('/home/project/src/components', { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isFile()) componentFiles.push(entry.name);
-          }
-        } catch {}
-        try { pkgJson = await wc.fs.readFile('/home/project/package.json', 'utf-8'); } catch {}
-        try { appContent = await wc.fs.readFile('/home/project/src/App.jsx', 'utf-8'); } catch {}
-
+        // Step 5: Index entire project using project-indexer
+        let projectIndexStr = '';
         let deps: string[] = [];
         let scripts: string[] = [];
         try {
-          const parsed = JSON.parse(pkgJson);
-          deps = Object.keys(parsed.dependencies || {});
-          scripts = Object.keys(parsed.scripts || {});
-        } catch {}
+          const { indexProject, formatProjectIndex } = await import('~/utils/project-indexer');
+          const idx = await indexProject(wc);
+          projectIndexStr = formatProjectIndex(idx);
+          deps = idx.deps;
+          scripts = Object.keys(idx.scripts);
+          console.log('[Reload] Indexed ' + idx.totalFiles + ' files (' + Math.round(idx.totalSize / 1024) + 'KB)');
+        } catch (e) {
+          console.error('[Reload] Index failed:', e);
+          projectIndexStr = '(Failed to index project)';
+        }
 
         // Step 6: Restart dev server
         let serverOk = false;
@@ -322,7 +302,7 @@ export const ChatImpl = memo(
           }
         }
 
-        // Step 7: Build status report
+        // Step 7: Build status report with full project index
         const lines: string[] = [
           '=== PAGE RELOADED ===',
           '',
@@ -332,16 +312,8 @@ export const ChatImpl = memo(
           'AI CREATED FILES (' + allFilepaths.length + '):',
           ...allFilepaths.map(f => '  ' + f),
           '',
-          'ACTUAL FILES IN WEBCONTAINER:',
-          'Root: ' + (rootFiles.join(', ') || '(empty)'),
-          'Src: ' + (srcFiles.join(', ') || '(empty)'),
-          'Components: ' + (componentFiles.join(', ') || '(none)'),
-          '',
-          'PACKAGE.JSON:',
-          pkgJson || '(missing)',
-          '',
-          'App.jsx (first 2000 chars):',
-          appContent ? appContent.substring(0, 2000) : '(missing)',
+          '=== CURRENT PROJECT FILES (FULL INDEX) ===',
+          projectIndexStr,
           '',
           'DEPENDENCIES: ' + deps.join(', '),
           'SCRIPTS: ' + scripts.join(', '),
@@ -396,11 +368,11 @@ export const ChatImpl = memo(
       });
     }, [messages, isLoading, parseMessages]);
 
-        const previewErrors = useStore(previewErrorFixer.errors);
+    const previewErrors = useStore(previewErrorFixer.errors);
     const terminalErrors = useStore(previewErrorFixer.terminalErrors);
     const previewRetryCount = useStore(previewErrorFixer.retryCount);
 
-    // AUTO-FIX LOOP: Detect errors → send to AI → wait for fix → re-check → repeat
+    // AUTO-FIX LOOP: Index project → send error+files to AI → wait → re-index → repeat
     useEffect(() => {
       const hasErrors = previewErrors.length > 0 || terminalErrors.length > 0;
 
@@ -415,38 +387,47 @@ export const ChatImpl = memo(
         return;
       }
 
-      // Don't rush — let the error settle, let streaming finish
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         if (!previewErrorFixer.canAutoFix()) return;
-
-        const errorMsg = previewErrorFixer.formatErrorForAI();
-        if (!errorMsg) return;
 
         previewErrorFixer.incrementRetry();
         previewErrorFixer.setFixing(true);
         workbenchStore.clearAlert();
 
-        const errorType = terminalErrors.length > 0 ? 'TERMINAL' : 'PREVIEW';
         const attempt = previewErrorFixer.retryCount.get();
-        console.log('[AUTO-FIX] Sending ' + errorType + ' error to AI (attempt ' + attempt + '/100)');
+        const errorType = terminalErrors.length > 0 ? 'TERMINAL' : 'PREVIEW';
+        console.log('[AUTO-FIX] Indexing project for ' + errorType + ' error (attempt ' + attempt + '/100)');
+
+        // INDEX the project — read ALL files from WebContainer
+        let errorMsg = '';
+        try {
+          const { webcontainer } = await import('~/lib/webcontainer');
+          const wc = await webcontainer;
+          errorMsg = await previewErrorFixer.formatErrorForAIWithIndex(wc);
+        } catch (e) {
+          console.error('[AUTO-FIX] Index failed, using fallback:', e);
+          errorMsg = previewErrorFixer.formatErrorForAI();
+        }
+
+        if (!errorMsg) {
+          previewErrorFixer.setFixing(false);
+          return;
+        }
 
         const fixMessage = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\n' + errorMsg;
+        console.log('[AUTO-FIX] Sending indexed error to AI (' + Math.round(fixMessage.length / 1024) + 'KB)');
         append({ role: 'user', content: fixMessage });
 
-        // POLLING RE-CHECK: Wait for AI to respond, then re-check for errors
-        // This creates the auto-recovery loop:
-        //   Error → AI fixes → new error? → AI fixes again → clean? → done
+        // POLLING RE-CHECK: After AI responds, re-index and check for errors
         let checkCount = 0;
-        const maxChecks = 30; // Check for 2.5 minutes (5s * 30)
-        const pollInterval = setInterval(() => {
+        const maxChecks = 30;
+        const pollInterval = setInterval(async () => {
           checkCount++;
-
           const currentErrors = previewErrorFixer.errors.get();
           const currentTerminal = previewErrorFixer.terminalErrors.get();
           const stillHasErrors = currentErrors.length > 0 || currentTerminal.length > 0;
 
           if (!stillHasErrors) {
-            // No more errors — clean!
             console.log('[AUTO-FIX] All errors resolved after ' + (checkCount * 5) + 's');
             previewErrorFixer.setFixing(false);
             previewErrorFixer.markFixed();
@@ -454,25 +435,20 @@ export const ChatImpl = memo(
             return;
           }
 
-          // Still has errors — check if AI is done responding (not loading)
           if (checkCount >= maxChecks) {
-            // Timeout — clear fixing state so next error can trigger a new fix cycle
-            console.log('[AUTO-FIX] Poll timeout after ' + (maxChecks * 5) + 's — allowing retry');
+            console.log('[AUTO-FIX] Poll timeout — clearing for next cycle');
             previewErrorFixer.setFixing(false);
             previewErrorFixer.markFixed();
             clearInterval(pollInterval);
             return;
           }
 
-          // If we get here, errors still exist but we're waiting
-          // The AI is probably still responding — keep polling
           if (checkCount % 6 === 0) {
-            // Log every 30 seconds
-            console.log('[AUTO-FIX] Still monitoring errors... (' + (checkCount * 5) + 's, ' + (currentErrors.length + currentTerminal.length) + ' errors)');
+            console.log('[AUTO-FIX] Still monitoring... (' + (checkCount * 5) + 's, ' + (currentErrors.length + currentTerminal.length) + ' errors)');
           }
         }, 5000);
 
-        // Also restart dev server for terminal errors after AI responds
+        // Restart dev server for terminal errors
         if (terminalErrors.length > 0) {
           setTimeout(async () => {
             try {
@@ -486,16 +462,16 @@ export const ChatImpl = memo(
                 return;
               }
 
-              console.log('[AUTO-FIX] Restarting dev server after terminal fix...');
+              console.log('[AUTO-FIX] Restarting dev server...');
               await terminal.executeCommand('autofix-install-' + Date.now(), 'npm install', () => {});
               await new Promise((r) => setTimeout(r, 2000));
               await terminal.executeCommand('autofix-start-' + Date.now(), 'npm run dev', () => {});
             } catch (e) {
               console.error('[AUTO-FIX] Restart failed:', e);
             }
-          }, 15000); // 15s delay for AI to finish writing files
+          }, 15000);
         }
-      }, 3000); // 3 second delay to let error settle
+      }, 3000);
 
       return () => clearTimeout(timer);
     }, [previewErrors, terminalErrors, previewRetryCount, chatStarted, isLoading, model, provider]);
