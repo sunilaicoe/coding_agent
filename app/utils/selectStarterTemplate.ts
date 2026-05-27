@@ -183,11 +183,12 @@ export async function getTemplates(templateName: string, title?: string) {
      */
   }
 
-  // exclude    .genesis
+  // exclude    .genesis and .bolt folders
   filteredFiles = filteredFiles.filter((x) => x.path.startsWith('.genesis') == false);
+  filteredFiles = filteredFiles.filter((x) => x.path.startsWith('.bolt') == false);
 
-  // check for ignore file in .genesis folder
-  const templateIgnoreFile = files.find((x) => x.path.startsWith('.genesis') && x.name == 'ignore');
+  // check for ignore file in .genesis or .bolt folder
+  const templateIgnoreFile = files.find((x) => (x.path.startsWith('.genesis') || x.path.startsWith('.bolt')) && x.name == 'ignore');
 
   const filesToImport = {
     files: filteredFiles,
@@ -220,7 +221,7 @@ ${file.content}
 </genesisArtifact>
 `;
   let userMessage = ``;
-  const templatePromptFile = files.filter((x) => x.path.startsWith('.genesis')).find((x) => x.name == 'prompt');
+  const templatePromptFile = files.filter((x) => x.path.startsWith('.genesis') || x.path.startsWith('.bolt')).find((x) => x.name == 'prompt');
 
   if (templatePromptFile) {
     userMessage = `

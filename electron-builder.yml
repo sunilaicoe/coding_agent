@@ -1,4 +1,4 @@
-appId: com.stackblitz.bolt.diy
+appId: com.genesis.diy
 productName: Bolt Local
 directories:
   buildResources: build
@@ -56,7 +56,7 @@ npmRebuild: false
 publish:
   provider: github
   owner: Derek-X-Wang
-  repo: bolt.local
+  repo: genesis.local
   private: true
   releaseType: release
 
