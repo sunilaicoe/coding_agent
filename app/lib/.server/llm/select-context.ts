@@ -180,7 +180,36 @@ export async function selectContext(props: {
   const updateContextBuffer = response.match(/<updateContextBuffer>([\s\S]*?)<\/updateContextBuffer>/);
 
   if (!updateContextBuffer) {
-    throw new Error('Invalid response. Please follow the response format');
+    logger.warn('AI did not follow XML format for context selection — falling back to top files');
+
+    // Fallback: include the first 5 files that aren't in current context
+    const fallbackFiles: FileMap = {};
+    let count = 0;
+    for (const path of filePaths) {
+      let relPath = path;
+      if (path.startsWith('/home/project/')) relPath = path.replace('/home/project/', '');
+      if (currrentFiles.includes(relPath)) continue;
+      fallbackFiles[relPath] = files[path];
+      count++;
+      if (count >= 5) break;
+    }
+
+    if (onFinish) onFinish(resp);
+
+    if (Object.keys(fallbackFiles).length > 0) {
+      logger.info(`Fallback selected ${Object.keys(fallbackFiles).length} files`);
+      return fallbackFiles;
+    }
+
+    // Last resort: return current context files
+    if (Object.keys(contextFiles).length > 0) {
+      logger.info('Returning existing context files as fallback');
+      return contextFiles;
+    }
+
+    // Truly nothing — return empty instead of throwing
+    logger.warn('No files available for context — continuing without context optimization');
+    return {};
   }
 
   const includeFiles =
@@ -225,7 +254,37 @@ export async function selectContext(props: {
   logger.info(`Total files: ${totalFiles}`);
 
   if (totalFiles == 0) {
-    throw new Error(`GENESIS failed to select files`);
+    logger.warn('AI selected 0 files — falling back to existing context');
+
+    // Return current context if available
+    if (Object.keys(contextFiles).length > 0) {
+      return contextFiles;
+    }
+
+    // Fallback: include top 5 relevant files by extension
+    const fallbackFiles: FileMap = {};
+    const priorityExts = ['.jsx', '.tsx', '.js', '.ts', '.css'];
+    let count = 0;
+    for (const ext of priorityExts) {
+      for (const path of filePaths) {
+        if (path.endsWith(ext) && count < 5) {
+          let relPath = path.startsWith('/home/project/') ? path.replace('/home/project/', '') : path;
+          if (!currrentFiles.includes(relPath)) {
+            fallbackFiles[relPath] = files[path];
+            count++;
+          }
+        }
+      }
+    }
+
+    if (Object.keys(fallbackFiles).length > 0) {
+      logger.info(`Fallback selected ${Object.keys(fallbackFiles).length} files`);
+      return fallbackFiles;
+    }
+
+    // Return empty instead of crashing
+    logger.warn('No files selected — continuing without context');
+    return {};
   }
 
   return filteredFiles;

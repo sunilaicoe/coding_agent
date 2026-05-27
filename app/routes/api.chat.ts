@@ -131,6 +131,7 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
         }
 
         if (filePaths.length > 0 && contextOptimization) {
+          try {
           logger.debug('Generating Chat Summary');
           dataStream.writeData({
             type: 'progress',
@@ -230,6 +231,18 @@ async function chatAction({ context, request }: ActionFunctionArgs) {
           } satisfies ProgressAnnotation);
 
           // logger.debug('Code Files Selected');
+          } catch (contextError) {
+            // Context optimization failed — continue without it
+            logger.error('Context optimization failed (non-fatal):', contextError);
+            filteredFiles = {};
+            dataStream.writeData({
+              type: 'progress',
+              label: 'context',
+              status: 'complete',
+              order: progressCounter++,
+              message: 'Skipping file selection',
+            } satisfies ProgressAnnotation);
+          }
         }
 
         const options: StreamingOptions = {
