@@ -205,7 +205,7 @@ export const ChatImpl = memo(
       chatStore.setKey('started', initialMessages.length > 0);
     }, []);
 
-    // RELOAD RECOVERY: restart dev server + continue AI if needed
+    // RELOAD RECOVERY: scan project, restart dev server, continue AI
     const reloadHandled = useRef(false);
     useEffect(() => {
       if (
@@ -220,39 +220,48 @@ export const ChatImpl = memo(
 
       reloadHandled.current = true;
 
-      // Find the last assistant message (skip user/hidden messages)
-      const lastAssistant = [...initialMessages].reverse().find((m) => m.role === 'assistant');
-      const assistantContent = lastAssistant
-        ? typeof lastAssistant.content === 'string'
-          ? lastAssistant.content
-          : Array.isArray(lastAssistant.content)
-            ? (lastAssistant.content.find((p: any) => p.type === 'text')?.text || '')
-            : ''
-        : '';
+      // Scan project files from WebContainer
+      const scanProject = async (wc: any): Promise<{files: string[], srcFiles: string[], hasPackageJson: boolean, deps: string[], scripts: string[]}> => {
+        const result = { files: [] as string[], srcFiles: [] as string[], hasPackageJson: false, deps: [] as string[], scripts: [] as string[] };
 
-      // Check if response was incomplete
-      const hasUnclosedArtifact = assistantContent.includes('<genesisArtifact') &&
-        (assistantContent.match(/<genesisArtifact/g) || []).length > (assistantContent.match(/<\/genesisArtifact>/g) || []).length;
-      const hasFileActions = assistantContent.includes('type="file"');
-      const hasStartAction = assistantContent.includes('type="start"') || assistantContent.includes('npm run dev');
-      const needsContinue = hasUnclosedArtifact || (hasFileActions && !hasStartAction);
+        try {
+          const entries = await wc.fs.readdir('/home/project', { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.isFile()) result.files.push(entry.name);
+          }
+        } catch {}
 
-      console.log('[Reload] Files:', hasFileActions, 'Start:', hasStartAction, 'Continue:', needsContinue);
+        try {
+          const srcEntries = await wc.fs.readdir('/home/project/src', { withFileTypes: true });
+          for (const entry of srcEntries) {
+            if (entry.isFile()) result.srcFiles.push(entry.name);
+          }
+        } catch {}
 
-      // Restart dev server function
+        try {
+          const pkg = await wc.fs.readFile('/home/project/package.json', 'utf-8');
+          result.hasPackageJson = true;
+          const parsed = JSON.parse(pkg);
+          result.deps = Object.keys(parsed.dependencies || {});
+          result.scripts = Object.keys(parsed.scripts || {});
+        } catch {}
+
+        return result;
+      };
+
+      // Restart dev server
       const restartDevServer = async (): Promise<boolean> => {
         try {
           const { webcontainer } = await import('~/lib/webcontainer');
           const wc = await webcontainer;
-          await new Promise((r) => setTimeout(r, 8000));
 
           const previews = workbenchStore.previews.get();
           if (previews.length > 0 && previews.some((p) => p.ready)) {
-            console.log('[Reload] Preview running');
+            console.log('[Reload] Preview already running');
             return true;
           }
 
-          try { await wc.fs.readFile('package.json', 'utf-8'); } catch { return false; }
+          if (!await wc.fs.readFile('/home/project/package.json', 'utf-8').catch(() => '')) return false;
 
           console.log('[Reload] Restarting dev server...');
           const terminal = workbenchStore.genesisTerminal();
@@ -272,22 +281,109 @@ export const ChatImpl = memo(
         }
       };
 
-      // Run recovery
+      // MAIN RECOVERY LOGIC
       (async () => {
-        if (needsContinue) {
-          console.log('[Reload] Incomplete - continuing AI...');
-          const msg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\nThe page was reloaded and your response was cut off. CONTINUE now.\n\n1. Do NOT repeat code already written\n2. Write the remaining files\n3. ALWAYS end with npm install and npm run dev';
-          append({ role: 'user', content: msg });
-        } else {
-          console.log('[Reload] Complete - restarting dev server...');
-          const ok = await restartDevServer();
-          if (!ok) {
-            console.log('[Reload] Restart failed - asking AI to fix...');
-            await new Promise((r) => setTimeout(r, 3000));
-            const fixMsg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\nThe page was reloaded. The project needs to restart.\n\n1. Check all files are correct\n2. Ensure package.json has all dependencies\n3. Output any fixes\n4. End with npm install and npm run dev';
-            append({ role: 'user', content: fixMsg });
-          }
+        console.log('[Reload] Starting recovery with', initialMessages.length, 'messages');
+
+        // Collect ALL assistant content across all messages
+        let allAssistantContent = '';
+        let allFilepaths: string[] = [];
+        for (const msg of initialMessages) {
+          if (msg.role !== 'assistant') continue;
+          const c = typeof msg.content === 'string' ? msg.content : '';
+          allAssistantContent += c + '\n';
+
+          // Extract file paths from genesisAction tags
+          const fileMatches = c.matchAll(/type="file"\s+filePath="([^"]+)"/g);
+          for (const m of fileMatches) allFilepaths.push(m[1]);
         }
+
+        // Check if last response was cut off
+        const lastAssistant = [...initialMessages].reverse().find((m) => m.role === 'assistant');
+        const lastContent = lastAssistant
+          ? (typeof lastAssistant.content === 'string' ? lastAssistant.content : '')
+          : '';
+
+        const hasUnclosedArtifact = lastContent.includes('<genesisArtifact') &&
+          (lastContent.match(/<genesisArtifact/g) || []).length > (lastContent.match(/<\/genesisArtifact>/g) || []).length;
+        const hasStartAction = allAssistantContent.includes('type="start"') || allAssistantContent.includes('npm run dev');
+        const hasFileActions = allFilepaths.length > 0;
+        const wasCutOff = hasUnclosedArtifact;
+
+        // Wait for WebContainer to boot and files to replay
+        const { webcontainer } = await import('~/lib/webcontainer');
+        const wc = await webcontainer;
+        await new Promise((r) => setTimeout(r, 8000));
+
+        // Scan actual project state
+        const project = await scanProject(wc);
+        console.log('[Reload] Project scan:', JSON.stringify(project));
+
+        // Try to restart dev server
+        const serverOk = await restartDevServer();
+
+        // Build status report
+        const statusLines: string[] = [
+          'PAGE RELOADED — PROJECT STATUS REPORT:',
+          '',
+          'FILES CREATED (' + allFilepaths.length + ' total):',
+          ...allFilepaths.map((f) => '  - ' + f),
+          '',
+          'ACTUAL FILES IN WEBCONTAINER:',
+          '  Root: ' + project.files.join(', '),
+          '  Src: ' + project.srcFiles.join(', '),
+          '',
+          'PACKAGE.JSON: ' + (project.hasPackageJson ? 'EXISTS' : 'MISSING'),
+          'DEPENDENCIES: ' + project.deps.join(', '),
+          'SCRIPTS: ' + project.scripts.join(', '),
+          '',
+          'DEV SERVER: ' + (serverOk ? 'RUNNING' : 'NOT RUNNING'),
+          'RESPONSE STATUS: ' + (wasCutOff ? 'CUT OFF (incomplete)' : 'COMPLETE'),
+          '',
+        ];
+
+        // Decide what to do
+        if (wasCutOff) {
+          // AI was cut off — continue writing files
+          statusLines.push(
+            'ACTION: Your previous response was CUT OFF.',
+            'Continue writing the remaining files from where you left off.',
+            'Do NOT repeat any code already written.',
+            'Do NOT recreate files that already exist.',
+            'Write ONLY the files that were NOT yet written.',
+            'ALWAYS end with:',
+            '<genesisAction type="shell">npm install</genesisAction>',
+            '<genesisAction type="start">npm run dev</genesisAction>',
+          );
+        } else if (!serverOk) {
+          // Dev server not running — ask AI to fix and continue
+          statusLines.push(
+            'ACTION: The dev server is NOT running after reload.',
+            'Possible causes: missing files, wrong package.json, broken imports.',
+            '',
+            'Please:',
+            '1. Check if ALL required files exist (especially src/App.jsx)',
+            '2. Fix any broken imports or syntax errors',
+            '3. If the project is incomplete, add the remaining features',
+            '4. Make sure package.json has correct dependencies and scripts',
+            '5. End with npm install and npm run dev',
+          );
+        } else {
+          // Everything running — check if project is complete or can be improved
+          statusLines.push(
+            'ACTION: The project is running. Review what exists and continue improving:',
+            '1. Check if all features from the original request are implemented',
+            '2. Add any missing features or components',
+            '3. Improve UI/UX, animations, responsive design',
+            '4. Fix any console errors or warnings',
+            '5. Add polish: loading states, error boundaries, accessibility',
+            '6. End with npm install and npm run dev',
+          );
+        }
+
+        const reloadMsg = '[Model: ' + model + ']\n\n[Provider: ' + provider.name + ']\n\n' + statusLines.join('\n');
+        console.log('[Reload] Sending recovery message to AI...');
+        append({ role: 'user', content: reloadMsg });
       })();
     }, [initialMessages, isLoading, model, provider, append]);
 
